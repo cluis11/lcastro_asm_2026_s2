@@ -1,4 +1,5 @@
 import numpy as np
+import time
 
 #Entradas: lista de N muestras de una señal x[n]
 #Salidas: lista de N complejos, uno por frecuencia
@@ -58,3 +59,20 @@ print("\n=== Comparacion DFT vs FFT ===")
 print("DFT:", np.round(np.abs(dft(x2)), 3))
 print("FFT:", np.round(np.abs(fft(x2)), 3))
 print("Coinciden:", np.allclose(dft(x2), fft(x2))) # np.allclose: compara con tolerancia
+
+
+print("\n=== Comparacion de tiempos ===")
+print(f"{'N':>6} {'DFT (s)':>10} {'FFT (s)':>10}")
+
+for N in [64, 128, 256, 512, 1024]:
+    x = np.random.rand(N)               # senal aleatoria de N muestras
+
+    t0 = time.perf_counter()            # marca de tiempo inicial
+    dft(x)
+    t_dft = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    fft(x)
+    t_fft = time.perf_counter() - t0
+
+    print(f"{N:>6} {t_dft:>10.4f} {t_fft:>10.4f}")
