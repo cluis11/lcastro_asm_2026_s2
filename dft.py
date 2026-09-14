@@ -1,5 +1,6 @@
 import numpy as np
 import time
+import matplotlib.pyplot as plt
 
 #Entradas: lista de N muestras de una señal x[n]
 #Salidas: lista de N complejos, uno por frecuencia
@@ -64,15 +65,58 @@ print("Coinciden:", np.allclose(dft(x2), fft(x2))) # np.allclose: compara con to
 print("\n=== Comparacion de tiempos ===")
 print(f"{'N':>6} {'DFT (s)':>10} {'FFT (s)':>10}")
 
-for N in [64, 128, 256, 512, 1024]:
-    x = np.random.rand(N)               # senal aleatoria de N muestras
+Ns = [64, 128, 256, 512, 1024]
+t_dfts = []
+t_ffts = []
+
+for Ni in Ns:
+    x = np.random.rand(Ni)              # senal aleatoria de Ni muestras
 
     t0 = time.perf_counter()            # marca de tiempo inicial
     dft(x)
-    t_dft = time.perf_counter() - t0
+    t_dfts.append(time.perf_counter() - t0)
 
     t0 = time.perf_counter()
     fft(x)
-    t_fft = time.perf_counter() - t0
+    t_ffts.append(time.perf_counter() - t0)
 
-    print(f"{N:>6} {t_dft:>10.4f} {t_fft:>10.4f}")
+    print(f"{Ni:>6} {t_dfts[-1]:>10.4f} {t_ffts[-1]:>10.4f}")
+
+plt.figure()                            # figura nueva para no encimar graficas
+plt.plot(Ns, t_dfts, 'o-', label='DFT')
+plt.plot(Ns, t_ffts, 's-', label='FFT')
+plt.xlabel('N')
+plt.ylabel('Tiempo (s)')
+plt.yscale('log')                       # escala log: sin esto la FFT se pega al eje
+plt.legend()
+plt.grid(True)
+plt.savefig('tiempos.png', dpi=150)
+
+# Entregable 2c: magnitud y fase de diferentes senales
+N = 64
+n = np.arange(N)
+
+senales = {
+    'Coseno': np.cos(2 * np.pi * 5 * n / N),
+    'Seno': np.sin(2 * np.pi * 5 * n / N),
+    'Suma de dos': np.cos(2*np.pi*3*n/N) + 2*np.sin(2*np.pi*10*n/N),
+}
+
+fig, axes = plt.subplots(len(senales), 3, figsize=(14, 9))
+
+for i, (nombre, x) in enumerate(senales.items()):
+    X = fft(x)
+    mag = np.abs(X)                 # np.abs: magnitud del complejo
+    fase = np.angle(X)              # np.angle: fase en radianes
+    fase[mag < 1e-6] = 0            # descarta fase donde no hay senal
+
+    axes[i][0].plot(n, x)
+    axes[i][0].set_title(f'{nombre} - tiempo')
+    axes[i][1].stem(mag)
+    axes[i][1].set_title('Magnitud')
+    axes[i][2].stem(fase)
+    axes[i][2].set_title('Fase')
+    axes[i][2].set_ylim(-3.5, 3.5)  # eje fijo: permite comparar entre filas
+
+plt.tight_layout()
+plt.savefig('magnitud_fase.png', dpi=150)
