@@ -17,6 +17,24 @@ def correlacion(x, h):
             r[m] += x[m + i] * h[i] # producto punto a punto y acumulacion
     return r
 
+# Entrada: r -- correlacion
+#          M -- largo del chirp
+# Salida: retardo en muestras, contado desde la muestra 0
+# Restriccion: asume que la captura arranca junto con la emision
+def retardo_desde_cero(r, M):
+    return M + np.argmax(r[M:])
+
+
+# Entrada: r -- correlacion
+#          M -- largo del chirp
+# Salida: retardo en muestras, contado desde la fuga directa
+# Restriccion: la fuga debe ser el pico mas alto de la correlacion
+def retardo_desde_fuga(r, M):
+    fuga = np.argmax(r)                         # primer pico: fuga directa
+    inicio = fuga + M                           # saltar la zona ciega
+    eco = inicio + np.argmax(r[inicio:])
+    return eco - fuga
+
 
 if __name__ == "__main__":
     # Ejemplo con numeros pequenos
@@ -49,3 +67,13 @@ if __name__ == "__main__":
     plt.title('Correlacion de la senal recibida con el chirp')
     plt.grid(True)
     plt.savefig('correlacion.png', dpi=150)
+
+    print("\n=== Prueba con distintos desfases de captura ===")
+    print(f"{'Desfase':>8} {'Desde cero':>12} {'Desde fuga':>12}")
+
+    for desfase in [0, 100, 350, 800]:
+        rec = generar_recibida(chirp, [retardo_real], [0.3], desfase=desfase)
+        rr = correlacion(rec, chirp)
+        d1 = retardo_desde_cero(rr, len(chirp))
+        d2 = retardo_desde_fuga(rr, len(chirp))
+        print(f"{desfase:>8} {d1:>12} {d2:>12}")
