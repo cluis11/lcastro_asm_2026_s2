@@ -55,10 +55,10 @@ if __name__ == "__main__":
 
     r = correlacion(recibida, chirp)
 
-    pico = np.argmax(r)                 # np.argmax: posicion del valor maximo
+    retardo = retardo_desde_fuga(r, len(chirp))
     print(f"Retardo real:      {retardo_real} muestras")
-    print(f"Retardo detectado: {pico} muestras")
-    print(f"Distancia:         {calcular_distancia(pico):.3f} m")
+    print(f"Retardo detectado: {retardo} muestras")
+    print(f"Distancia:         {calcular_distancia(retardo):.3f} m")
 
     plt.figure(figsize=(10, 4))
     plt.plot(r)
