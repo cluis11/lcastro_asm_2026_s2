@@ -1,4 +1,5 @@
 import numpy as np
+import time
 
 from fft import fft
 from ifft import ifft
@@ -43,3 +44,20 @@ if __name__ == "__main__":
     print(f"Directa detecta: {retardo_desde_fuga(r_directa, len(chirp))}")
     print(f"FFT detecta:     {retardo_desde_fuga(r_fft, len(chirp))}")
     print(f"Coinciden:       {np.allclose(r_directa, r_fft)}")
+
+    print("\n=== Comparacion de tiempos ===")
+    print(f"{'N':>6} {'Directa (s)':>13} {'FFT (s)':>10}")
+
+    for Ni in [512, 1024, 2048, 4096]:
+        x = np.random.rand(Ni)
+        h = chirp
+
+        t0 = time.perf_counter()
+        correlacion(x, h)
+        t_dir = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        correlacion_fft(x, h)
+        t_fft = time.perf_counter() - t0
+
+        print(f"{Ni:>6} {t_dir:>13.4f} {t_fft:>10.4f}")
