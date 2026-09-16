@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 from senal import generar_chirp, generar_recibida, calcular_distancia, fs
 
@@ -40,3 +41,11 @@ if __name__ == "__main__":
     print(f"Retardo real:      {retardo_real} muestras")
     print(f"Retardo detectado: {pico} muestras")
     print(f"Distancia:         {calcular_distancia(pico):.3f} m")
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(r)
+    plt.xlabel('Retardo (muestras)')
+    plt.ylabel('Correlacion')
+    plt.title('Correlacion de la senal recibida con el chirp')
+    plt.grid(True)
+    plt.savefig('correlacion.png', dpi=150)
