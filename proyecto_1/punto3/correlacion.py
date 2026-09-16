@@ -1,0 +1,42 @@
+import numpy as np
+
+from senal import generar_chirp, generar_recibida, calcular_distancia, fs
+
+
+# Entrada: x -- senal recibida (larga)
+#          h -- senal conocida que se busca (corta)
+# Salida: r -- correlacion; r[m] mide el parecido de x con h desplazada m muestras
+# Restriccion:  len(h) no debe superar len(x)
+def correlacion(x, h):
+    N = len(x)
+    M = len(h)
+    r = np.zeros(N - M + 1) # una posicion por cada desplazamiento
+    for m in range(N - M + 1): # m: posicion donde se apoya el patron
+        for i in range(M): # i: recorre las M muestras del patron
+            r[m] += x[m + i] * h[i] # producto punto a punto y acumulacion
+    return r
+
+
+if __name__ == "__main__":
+    # Ejemplo con numeros pequenos
+    x_demo = np.array([0, 0, 1, 2, 1, 0, 0, 0])
+    h_demo = np.array([1, 2, 1])
+    r_demo = correlacion(x_demo, h_demo)
+    print("=== Ejemplo con numeros pequenos ===")
+    print("Senal:      ", x_demo)
+    print("Patron:     ", h_demo)
+    print("Correlacion:", r_demo)
+    print("Pico en:    ", np.argmax(r_demo), "(el patron empieza ahi)")
+
+    # Caso real: buscar el eco dentro de la senal recibida
+    print("\n=== Deteccion del eco ===")
+    chirp = generar_chirp()
+    retardo_real = 1200
+    recibida = generar_recibida(chirp, [retardo_real], [0.3])
+
+    r = correlacion(recibida, chirp)
+
+    pico = np.argmax(r)                 # np.argmax: posicion del valor maximo
+    print(f"Retardo real:      {retardo_real} muestras")
+    print(f"Retardo detectado: {pico} muestras")
+    print(f"Distancia:         {calcular_distancia(pico):.3f} m")
