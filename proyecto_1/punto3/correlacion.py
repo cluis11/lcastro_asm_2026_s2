@@ -30,8 +30,10 @@ def retardo_desde_cero(r, M):
 # Salida: retardo en muestras, contado desde la fuga directa
 # Restriccion: la fuga debe ser el pico mas alto de la correlacion
 def retardo_desde_fuga(r, M):
-    fuga = np.argmax(r)                         # primer pico: fuga directa
-    inicio = fuga + M                           # saltar la zona ciega
+    fuga = np.argmax(r) # primer pico: fuga directa
+    inicio = fuga + M # saltar la zona ciega
+    if inicio >= len(r): # no queda senal despues de la zona ciega
+        return None 
     eco = inicio + np.argmax(r[inicio:])
     return eco - fuga
 
@@ -66,7 +68,7 @@ if __name__ == "__main__":
     plt.ylabel('Correlacion')
     plt.title('Correlacion de la senal recibida con el chirp')
     plt.grid(True)
-    plt.savefig('correlacion.png', dpi=150)
+    plt.savefig('correlacion_chirp_largo.png', dpi=150)
 
     print("\n=== Prueba con distintos desfases de captura ===")
     print(f"{'Desfase':>8} {'Desde cero':>12} {'Desde fuga':>12}")

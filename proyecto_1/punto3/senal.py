@@ -1,10 +1,10 @@
 import numpy as np
 
 fs = 44100 # frecuencia de muestreo, en muestras por segundo
-dur = 0.005 # duracion del chirp, en segundos
+dur = 0.05 # duracion del chirp, en segundos
 f0 = 2000 # frecuencia inicial del chirp, en Hz
 f1 = 8000 # frecuencia final del chirp, en Hz
-N = 4096 # cantidad de muestras de la senal recibida
+N = 16384 # cantidad de muestras de la senal recibida
 v = 343.0 # velocidad del sonido, en m/s
 
 
