@@ -21,14 +21,16 @@ def generar_chirp():
 #          retardos -- lista de retardos de cada eco, en muestras
 #          atenuaciones -- lista de amplitudes de cada eco
 #          ruido -- amplitud del ruido de fondo
+#          desfase -- muestras entre el inicio de la captura y la emision
 # Salida: arreglo de N muestras con la senal recibida simulada
 # Restriccion: retardo + len(chirp) no debe superar N
-def generar_recibida(chirp, retardos, atenuaciones, ruido=0.2):
+def generar_recibida(chirp, retardos, atenuaciones, ruido=0.2, desfase=0):
     recibida = np.zeros(N) # arreglo de N ceros
-    recibida[0:len(chirp)] += chirp # fuga directa del parlante al microfono
+    recibida[desfase:desfase+len(chirp)] += chirp # fuga directa del parlante al microfono
 
     for retardo, atenuacion in zip(retardos, atenuaciones):
-        recibida[retardo:retardo+len(chirp)] += atenuacion * chirp
+        ini = desfase + retardo
+        recibida[ini:ini+len(chirp)] += atenuacion * chirp
 
     recibida += ruido * np.random.randn(N) # np.random.randn: ruido gaussiano
     return recibida
