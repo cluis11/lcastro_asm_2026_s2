@@ -1,7 +1,7 @@
 import numpy as np
 
 from fft import fft
-from idft import idft
+from ifft import ifft
 
 
 # Entrada: x -- senal recibida (larga)
@@ -24,7 +24,7 @@ def correlacion_fft(x, h):
     H = fft(h_pad)
     R = np.conj(H) * X # np.conj: conjugado, convierte en correlacion
 
-    r = np.real(idft(R)) # np.real: descarta residuo imaginario
+    r = np.real(ifft(R)) # np.real: descarta residuo imaginario
     return r[:N - M + 1] # recortar al largo de la version directa
 
 if __name__ == "__main__":
