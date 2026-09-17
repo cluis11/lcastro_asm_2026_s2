@@ -33,7 +33,7 @@ if __name__ == "__main__":
     from correlacion import correlacion, retardo_desde_fuga
 
     chirp = generar_chirp()
-    retardo_real = 4000
+    retardo_real = 1200
     recibida = generar_recibida(chirp, [retardo_real], [0.3])
 
     r_directa = correlacion(recibida, chirp)
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     print("\n=== Comparacion de tiempos ===")
     print(f"{'N':>6} {'Directa (s)':>13} {'FFT (s)':>10}")
 
-    for Ni in [4096, 8192, 16384]:
+    for Ni in [1024, 2048, 4096]:
         x = np.random.rand(Ni)
         h = chirp
 
