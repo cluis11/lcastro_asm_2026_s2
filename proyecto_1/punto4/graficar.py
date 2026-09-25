@@ -3,10 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import serial
 
-PUERTO = '/dev/ttyUSB0'
+PUERTO = '/dev/ttyUSB1'
 BAUD = 115200
 N = 2048
-M = 40
+M = 100
 FS = 8000.0
 
 
