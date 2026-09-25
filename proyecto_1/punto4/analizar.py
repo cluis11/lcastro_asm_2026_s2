@@ -7,25 +7,23 @@ import serial
 PUERTO = '/dev/ttyUSB0'
 BAUD = 115200
 
-# deben coincidir con los del programa del ESP32
 N = 2048
-M = 200
+M = 150
 F0 = 0.10
 F1 = 0.40
+V = 343.0
 
-V = 343.0          # velocidad del sonido, m/s
+MARGEN_EXTRA = 30      # muestras extra a descartar despues de la zona ciega,
+                       # para evitar la cola de la fuga
+RAZON_MINIMA = 6       # el pico debe ser al menos esto veces el ruido
 
 
-# Entrada:      ninguna
-# Salida:       fs medida en Hz y arreglo con las N muestras capturadas
-# Restriccion:  el ESP32 debe estar corriendo el programa de captura
 def capturar():
     with serial.Serial(PUERTO, BAUD, timeout=10) as s:
-        time.sleep(2.5)                 # esperar el reinicio del ESP32
+        time.sleep(2.5)
         s.reset_input_buffer()
-        s.write(b'x')                   # disparar una medicion
+        s.write(b'x\n')
 
-        # descartar todo hasta encontrar el inicio de un bloque limpio
         while True:
             linea = s.readline().decode(errors='ignore').strip()
             if linea == '--- INICIO ---':
@@ -52,28 +50,14 @@ def capturar():
 
     if fs is None:
         raise RuntimeError("no se pudo leer la frecuencia de muestreo")
-    if len(muestras) < N // 2:
-        raise RuntimeError(f"solo llegaron {len(muestras)} muestras de {N}")
 
     return fs, np.array(muestras, dtype=float)
 
 
-# Entrada:      ninguna, usa los parametros globales
-# Salida:       arreglo con las M muestras del chirp, igual al del ESP32
-# Restriccion:  F0 y F1 en frecuencia normalizada
 def generar_chirp():
     n = np.arange(M)
     fase = 2 * np.pi * (F0 * n + (F1 - F0) / (2.0 * M) * n * n)
     return np.sin(fase)
-
-
-# Entrada:      x -- senal capturada, ventana -- largo de la media movil
-# Salida:       senal sin la deriva lenta del nivel de continua
-# Restriccion:  la ventana debe ser mayor que el periodo de la senal util
-def quitar_deriva(x, ventana=101):
-    kernel = np.ones(ventana) / ventana
-    base = np.convolve(x, kernel, mode='same')   # tendencia lenta
-    return x - base                              # filtro pasa-altos
 
 
 if __name__ == "__main__":
@@ -81,44 +65,49 @@ if __name__ == "__main__":
     print(f"fs medida:  {fs:.1f} Hz")
     print(f"muestras:   {len(datos)}")
 
-    datos = quitar_deriva(datos)
-
+    datos = datos - np.mean(datos)
     chirp = generar_chirp()
     r = np.correlate(datos, chirp, mode='valid')
     env = np.abs(r)
 
     fuga = int(np.argmax(env))
-    inicio = fuga + M
-    eco = None
+    inicio = fuga + M + MARGEN_EXTRA          # zona ciega + margen anti-cola
 
-    if inicio < len(env):
+    zona_ciega_m = V * (M / fs) / 2
+    margen_m = V * (MARGEN_EXTRA / fs) / 2
+    print(f"zona ciega:      {zona_ciega_m:.3f} m (+ {margen_m:.3f} m de margen)")
+
+    if inicio >= len(env):
+        print("RECHAZADO: no queda senal despues de la zona ciega")
+    else:
+        # ruido de referencia: mediana de la zona posterior, EXCLUYENDO
+        # una ventana angosta alrededor del propio pico que se va a evaluar
+        ruido = float(np.median(env[inicio:]))
         eco = inicio + int(np.argmax(env[inicio:]))
+        pico_val = env[eco]
+        razon = pico_val / ruido if ruido > 0 else 0
         retardo = eco - fuga
         d = V * (retardo / fs) / 2
-        print(f"pico fuga:  muestra {fuga}  (valor {env[fuga]:.0f})")
-        print(f"pico eco:   muestra {eco}  (valor {env[eco]:.0f})")
-        print(f"ruido medio:{np.median(env[inicio:]):.0f}")
-        print(f"retardo:    {retardo} muestras")
-        print(f"distancia:  {d:.3f} m")
-    else:
-        print("no queda senal despues de la zona ciega")
 
-    fig, axes = plt.subplots(2, 1, figsize=(11, 7))
+        print(f"pico fuga:   muestra {fuga}  valor {env[fuga]:.0f}")
+        print(f"pico eco:    muestra {eco}  valor {pico_val:.0f}")
+        print(f"ruido medio: {ruido:.0f}")
+        print(f"razon pico/ruido: {razon:.1f}  (minimo aceptado: {RAZON_MINIMA})")
+        print(f"retardo:     {retardo} muestras")
+        print(f"distancia calculada: {d:.3f} m")
 
-    axes[0].plot(datos, linewidth=0.6)
-    axes[0].set_title('Senal capturada, sin deriva')
-    axes[0].set_xlabel('Muestras')
-    axes[0].grid(True)
+        if razon < RAZON_MINIMA:
+            print(f">> RECHAZADO: el pico no se destaca lo suficiente del ruido (no hay deteccion confiable)")
+        else:
+            print(f">> DETECCION ACEPTADA: distancia = {d:.3f} m")
 
-    axes[1].plot(env, linewidth=0.7)
-    axes[1].axvline(fuga, color='green', linestyle='--', alpha=0.6, label=f'Fuga ({fuga})')
-    if eco is not None:
-        axes[1].axvline(eco, color='red', linestyle='--', alpha=0.6, label=f'Eco ({eco})')
-    axes[1].set_title('Correlacion con el chirp transmitido')
-    axes[1].set_xlabel('Retardo (muestras)')
-    axes[1].legend()
-    axes[1].grid(True)
-
-    plt.tight_layout()
+    plt.figure(figsize=(10, 4))
+    plt.plot(env)
+    plt.axvline(fuga, color='green', linestyle='--', label='fuga')
+    plt.axvline(inicio, color='orange', linestyle=':', label='inicio zona util')
+    plt.xlabel('Retardo (muestras)')
+    plt.ylabel('Correlacion')
+    plt.legend()
+    plt.grid(True)
     plt.savefig('captura_real.png', dpi=150)
     print("Grafica guardada en captura_real.png")
