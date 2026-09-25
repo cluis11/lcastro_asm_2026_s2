@@ -1,16 +1,15 @@
 #include <Arduino.h>
 
-const int PIN_DAC = 25;
-uint8_t tabla[64];
-
 void setup() {
-  for (int i = 0; i < 64; i++) {
-    tabla[i] = 128 + 120 * sin(2 * PI * i / 64);
-  }
+  Serial.begin(115200);
 }
 
 void loop() {
-  for (int i = 0; i < 64; i++) {
-    dacWrite(PIN_DAC, tabla[i]);
-  }
+  tone(25, 500);   delay(1500); noTone(25); delay(300);
+  tone(25, 1000);  delay(1500); noTone(25); delay(300);
+  tone(25, 2000);  delay(1500); noTone(25); delay(300);
+  tone(25, 3000);  delay(1500); noTone(25); delay(300);
+  tone(25, 4000);  delay(1500); noTone(25); delay(300);
+  tone(25, 6000);  delay(1500); noTone(25); delay(300);
+  delay(3000);
 }
