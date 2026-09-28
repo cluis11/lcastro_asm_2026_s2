@@ -8,7 +8,7 @@ PUERTO = '/dev/ttyUSB0'
 BAUD = 115200
 
 N = 2048
-M = 150
+M = 15
 F0 = 0.10
 F1 = 0.40
 V = 343.0
