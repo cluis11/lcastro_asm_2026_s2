@@ -1,405 +1,302 @@
+import serial
 import time
-import numpy as np
+from pathlib import Path
+
 import pandas as pd
 import matplotlib.pyplot as plt
-import serial
 
 
-# =====================================================
-# CONFIGURACION
-# =====================================================
+PUERTO = "/dev/ttyUSB1"
+BAUDIOS = 115200
 
-PUERTO = "/dev/ttyUSB0"
-BAUD = 115200
-
+FS = 86000.0
 N = 2048
-ZOOM_MS = 10.0
+
+MARCA_CRUDOS = "----------- CRUDOS --------------"
+MARCA_FILTRADOS = "----------- FILTRADOS -----------"
+MARCA_RESIDUAL = "----------- RESIDUAL ------------"
+MARCA_FIN = "------------- FIN ---------------"
 
 
-# =====================================================
-# CAPTURA SERIAL
-# =====================================================
+def crear_carpeta_salida():
+    base = Path("graficas")
 
-def capturar():
+    if not base.exists():
+        base.mkdir()
+        return base, 0
+
+    numero = 1
+
+    while True:
+        carpeta = Path(f"graficas_{numero}")
+
+        if not carpeta.exists():
+            carpeta.mkdir()
+            return carpeta, numero
+
+        numero += 1
+
+
+def leer_bloque(ser, cantidad):
+    datos = []
+
+    while len(datos) < cantidad:
+        linea = ser.readline().decode("utf-8", errors="ignore").strip()
+
+        try:
+            datos.append(float(linea))
+        except ValueError:
+            pass
+
+    return datos
+
+
+def ejecutar_medicion():
+    ser = serial.Serial(PUERTO, BAUDIOS, timeout=2)
+
+    time.sleep(0.5)
+    ser.reset_input_buffer()
+
+    print("Enviando comando x...")
+    ser.write(b"x\n")
+    ser.flush()
+
+    metricas = {}
+
     crudos = []
     filtrados = []
+    residual = []
 
-    fs = 86000.0
-    duracion_chirp_ms = 2.0
-    tiempo_fir_ms = None
-    rms_cruda = None
-    rms_filtrada = None
+    while True:
+        linea = ser.readline().decode("utf-8", errors="ignore").strip()
 
-    with serial.Serial(PUERTO, BAUD, timeout=1) as s:
-        time.sleep(3.0)
-        s.reset_input_buffer()
+        if not linea:
+            continue
 
-        print("Enviando x...")
-        s.write(b"x\n")
-        s.flush()
+        print(linea)
 
-        print("Esperando medicion...")
+        if linea.startswith("RMS residual:"):
+            metricas["rms_residual"] = float(
+                linea.split(":", 1)[1].strip()
+            )
 
-        t0 = time.time()
+        elif linea.startswith("Pico residual:"):
+            metricas["pico_residual"] = float(
+                linea.split(":", 1)[1].strip()
+            )
 
-        # =================================================
-        # ESPERAR INICIO
-        # =================================================
+        elif linea.startswith("Residual / ruido RMS:"):
+            metricas["relacion_rms"] = float(
+                linea.split(":", 1)[1].strip()
+            )
 
-        while True:
-            linea = s.readline().decode(errors="ignore").strip()
+        elif linea.startswith("Residual / ruido pico:"):
+            metricas["relacion_pico"] = float(
+                linea.split(":", 1)[1].strip()
+            )
 
-            if linea:
-                print("ESP32 >", linea)
+        elif linea == MARCA_CRUDOS:
+            print("Recibiendo muestras crudas...")
+            crudos = leer_bloque(ser, N)
 
-            if linea == "----------- MEDICION -----------":
-                break
+        elif linea == MARCA_FILTRADOS:
+            print("Recibiendo muestras filtradas...")
+            filtrados = leer_bloque(ser, N)
 
-            if time.time() - t0 > 10:
-                raise RuntimeError("Timeout esperando inicio de medicion")
+        elif linea == MARCA_RESIDUAL:
+            print("Recibiendo muestras residuales...")
+            residual = leer_bloque(ser, N)
 
-        # =================================================
-        # LEER CABECERA HASTA CRUDOS
-        # =================================================
+        elif linea == MARCA_FIN:
+            break
 
-        while True:
-            linea = s.readline().decode(errors="ignore").strip()
+    ser.close()
 
-            if not linea:
-                continue
+    return metricas, crudos, filtrados, residual
 
-            print("ESP32 >", linea)
 
-            if linea.startswith("Fs objetivo:"):
-                texto = linea.split(":", 1)[1].replace("Hz", "").strip()
+def guardar_csv(crudos, filtrados, residual, carpeta, numero):
+    tiempo_ms = [
+        i / FS * 1000.0
+        for i in range(N)
+    ]
 
-                try:
-                    fs = float(texto)
-                except ValueError:
-                    pass
+    media = sum(crudos) / len(crudos)
 
-            elif linea.startswith("Duracion chirp:"):
-                texto = linea.split(":", 1)[1].replace("ms", "").strip()
+    centrados = [
+        x - media
+        for x in crudos
+    ]
 
-                try:
-                    duracion_chirp_ms = float(texto)
-                except ValueError:
-                    pass
+    df = pd.DataFrame({
+        "muestra": range(N),
+        "tiempo_ms": tiempo_ms,
+        "adc": crudos,
+        "adc_centrado": centrados,
+        "adc_filtrado": filtrados,
+        "residual": residual,
+    })
 
-            elif linea.startswith("RMS cruda:"):
-                texto = linea.split(":", 1)[1].strip()
+    ruta_csv = carpeta / f"muestras_{numero}.csv"
+    df.to_csv(ruta_csv, index=False)
 
-                try:
-                    rms_cruda = float(texto)
-                except ValueError:
-                    pass
+    return df
 
-            elif linea.startswith("RMS filtrada:"):
-                texto = linea.split(":", 1)[1].strip()
 
-                try:
-                    rms_filtrada = float(texto)
-                except ValueError:
-                    pass
+def graficar(df, carpeta, numero):
+    plt.figure(figsize=(12, 5))
+    plt.plot(df["tiempo_ms"], df["adc"])
+    plt.xlabel("Tiempo (ms)")
+    plt.ylabel("ADC")
+    plt.title(f"Señal cruda - medición {numero}")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(
+        carpeta / f"senal_cruda_{numero}.png",
+        dpi=150
+    )
+    plt.close()
 
-            elif linea.startswith("Tiempo FIR:"):
-                texto = linea.split(":", 1)[1].replace("ms", "").strip()
+    plt.figure(figsize=(12, 5))
+    plt.plot(df["tiempo_ms"], df["adc_filtrado"])
+    plt.xlabel("Tiempo (ms)")
+    plt.ylabel("Amplitud")
+    plt.title(f"Señal filtrada por el ESP32 - medición {numero}")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(
+        carpeta / f"senal_filtrada_{numero}.png",
+        dpi=150
+    )
+    plt.close()
 
-                try:
-                    tiempo_fir_ms = float(texto)
-                except ValueError:
-                    pass
+    plt.figure(figsize=(12, 5))
+    plt.plot(df["tiempo_ms"], df["residual"])
+    plt.xlabel("Tiempo (ms)")
+    plt.ylabel("Amplitud")
+    plt.title(
+        f"Señal residual: medición - baseline - corrida {numero}"
+    )
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(
+        carpeta / f"senal_residual_{numero}.png",
+        dpi=150
+    )
+    plt.close()
 
-            if linea == "----------- CRUDOS --------------":
-                break
+    plt.figure(figsize=(12, 5))
+    plt.plot(
+        df["tiempo_ms"],
+        df["adc_filtrado"],
+        label="Filtrada"
+    )
+    plt.plot(
+        df["tiempo_ms"],
+        df["residual"],
+        label="Residual"
+    )
+    plt.xlabel("Tiempo (ms)")
+    plt.ylabel("Amplitud")
+    plt.title(
+        f"Señal filtrada vs residual - medición {numero}"
+    )
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(
+        carpeta / f"comparacion_residual_{numero}.png",
+        dpi=150
+    )
+    plt.close()
 
-        # =================================================
-        # LEER CRUDOS
-        # =================================================
 
-        while True:
-            linea = s.readline().decode(errors="ignore").strip()
+def main():
+    carpeta, numero = crear_carpeta_salida()
 
-            if linea == "----------- FILTRADOS -----------":
-                break
+    print()
+    print("================================")
+    print(f" MEDICION {numero}")
+    print("================================")
+    print(f"Carpeta de salida: {carpeta}")
+    print()
 
-            if linea:
-                try:
-                    crudos.append(float(linea))
-                except ValueError:
-                    pass
+    metricas, crudos, filtrados, residual = ejecutar_medicion()
 
-        # =================================================
-        # LEER FILTRADOS
-        # =================================================
+    print()
+    print("================================")
+    print(" RESULTADO")
+    print("================================")
 
-        while True:
-            linea = s.readline().decode(errors="ignore").strip()
+    print(f"Muestras crudas:     {len(crudos)}")
+    print(f"Muestras filtradas:  {len(filtrados)}")
+    print(f"Muestras residuales: {len(residual)}")
 
-            if linea == "------------- FIN ---------------":
-                break
+    if len(crudos) != N:
+        print("ERROR: cantidad incorrecta de muestras crudas")
+        return
 
-            if linea:
-                try:
-                    filtrados.append(float(linea))
-                except ValueError:
-                    pass
+    if len(filtrados) != N:
+        print("ERROR: cantidad incorrecta de muestras filtradas")
+        return
 
-    return (
-        np.array(crudos, dtype=float),
-        np.array(filtrados, dtype=float),
-        fs,
-        duracion_chirp_ms,
-        rms_cruda,
-        rms_filtrada,
-        tiempo_fir_ms
+    if len(residual) != N:
+        print("ERROR: cantidad incorrecta de muestras residuales")
+        return
+
+    df = guardar_csv(
+        crudos,
+        filtrados,
+        residual,
+        carpeta,
+        numero
     )
 
-
-# =====================================================
-# CAPTURAR
-# =====================================================
-
-crudos, filtrados, FS, duracion_chirp_ms, rms_cruda, rms_filtrada, tiempo_fir_ms = capturar()
-
-
-# =====================================================
-# VALIDAR
-# =====================================================
-
-print()
-print("===== DATOS RECIBIDOS =====")
-print(f"Muestras crudas: {len(crudos)}")
-print(f"Muestras filtradas: {len(filtrados)}")
-print(f"Fs: {FS:.1f} Hz")
-
-if len(crudos) != N:
-    print(f"ADVERTENCIA: esperaba {N} muestras crudas")
-
-if len(filtrados) != N:
-    print(f"ADVERTENCIA: esperaba {N} muestras filtradas")
-
-N_USAR = min(len(crudos), len(filtrados))
-
-crudos = crudos[:N_USAR]
-filtrados = filtrados[:N_USAR]
-
-
-# =====================================================
-# CENTRAR SEÑAL CRUDA
-# =====================================================
-
-media = np.mean(crudos)
-cruda_centrada = crudos - media
-
-
-# =====================================================
-# EJES
-# =====================================================
-
-n = np.arange(N_USAR)
-t_ms = n / FS * 1000.0
-
-
-# =====================================================
-# ESTADISTICAS
-# =====================================================
-
-print()
-print("===== ADC =====")
-print(f"Media cruda: {media:.2f}")
-print(f"Min ADC: {np.min(crudos):.0f}")
-print(f"Max ADC: {np.max(crudos):.0f}")
-print(f"Rango ADC: {np.max(crudos) - np.min(crudos):.0f}")
-
-print()
-print("===== FILTRO ESP32 =====")
-
-if rms_cruda is not None:
-    print(f"RMS cruda ESP32: {rms_cruda:.2f}")
-
-if rms_filtrada is not None:
-    print(f"RMS filtrada ESP32: {rms_filtrada:.2f}")
-
-if tiempo_fir_ms is not None:
-    print(f"Tiempo FIR ESP32: {tiempo_fir_ms:.3f} ms")
-
-rms_python_cruda = np.sqrt(np.mean(cruda_centrada ** 2))
-rms_python_filtrada = np.sqrt(np.mean(filtrados ** 2))
-
-print(f"RMS cruda verificada: {rms_python_cruda:.2f}")
-print(f"RMS filtrada verificada: {rms_python_filtrada:.2f}")
-
-
-# =====================================================
-# GUARDAR CSV
-# =====================================================
-
-df = pd.DataFrame({
-    "muestra": n,
-    "tiempo_ms": t_ms,
-    "adc": crudos,
-    "adc_centrado": cruda_centrada,
-    "adc_filtrado_esp32": filtrados
-})
-
-df.to_csv(
-    "muestras.csv",
-    index=False
-)
-
-print()
-print("Guardado: muestras.csv")
-
-
-# =====================================================
-# GRAFICA 1: CRUDA COMPLETA
-# =====================================================
-
-plt.figure(figsize=(13, 5))
-
-plt.plot(
-    t_ms,
-    cruda_centrada,
-    linewidth=0.8
-)
-
-plt.axvline(
-    duracion_chirp_ms,
-    linestyle="--",
-    label=f"Fin chirp {duracion_chirp_ms:.2f} ms"
-)
-
-plt.xlabel("Tiempo (ms)")
-plt.ylabel("ADC - media")
-plt.title("Señal cruda recibida")
-
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-
-plt.savefig(
-    "senal_cruda.png",
-    dpi=150
-)
-
-
-# =====================================================
-# GRAFICA 2: FILTRADA COMPLETA
-# =====================================================
-
-plt.figure(figsize=(13, 5))
-
-plt.plot(
-    t_ms,
-    filtrados,
-    linewidth=0.8
-)
-
-plt.axvline(
-    duracion_chirp_ms,
-    linestyle="--",
-    label=f"Fin chirp {duracion_chirp_ms:.2f} ms"
-)
-
-plt.xlabel("Tiempo (ms)")
-plt.ylabel("Salida FIR")
-plt.title("Señal filtrada por el ESP32 | 3.5-11 kHz")
-
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-
-plt.savefig(
-    "senal_filtrada_esp32.png",
-    dpi=150
-)
-
-
-# =====================================================
-# GRAFICA 3: COMPARACION
-# =====================================================
-
-plt.figure(figsize=(13, 6))
-
-plt.plot(
-    t_ms,
-    cruda_centrada,
-    linewidth=0.8,
-    alpha=0.5,
-    label="Cruda"
-)
-
-plt.plot(
-    t_ms,
-    filtrados,
-    linewidth=1.0,
-    label="FIR ESP32"
-)
-
-plt.axvline(
-    duracion_chirp_ms,
-    linestyle="--",
-    label=f"Fin chirp {duracion_chirp_ms:.2f} ms"
-)
-
-plt.xlim(0, ZOOM_MS)
-
-plt.xlabel("Tiempo (ms)")
-plt.ylabel("Amplitud")
-plt.title(f"Cruda vs FIR ESP32 | primeros {ZOOM_MS:.0f} ms")
-
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-
-plt.savefig(
-    "comparacion_esp32.png",
-    dpi=150
-)
-
-
-# =====================================================
-# GRAFICA 4: FILTRADA ZOOM
-# =====================================================
-
-plt.figure(figsize=(13, 5))
-
-plt.plot(
-    t_ms,
-    filtrados,
-    linewidth=1.0
-)
-
-plt.axvline(
-    duracion_chirp_ms,
-    linestyle="--",
-    label=f"Fin chirp {duracion_chirp_ms:.2f} ms"
-)
-
-plt.xlim(0, ZOOM_MS)
-
-plt.xlabel("Tiempo (ms)")
-plt.ylabel("Salida FIR")
-plt.title(f"FIR calculado en ESP32 | primeros {ZOOM_MS:.0f} ms")
-
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-
-plt.savefig(
-    "senal_filtrada_esp32_zoom.png",
-    dpi=150
-)
-
-
-# =====================================================
-# FINAL
-# =====================================================
-
-print("Guardado: senal_cruda.png")
-print("Guardado: senal_filtrada_esp32.png")
-print("Guardado: comparacion_esp32.png")
-print("Guardado: senal_filtrada_esp32_zoom.png")
-
-plt.show()
+    graficar(
+        df,
+        carpeta,
+        numero
+    )
+
+    print()
+    print("----------- METRICAS ------------")
+
+    if "rms_residual" in metricas:
+        print(
+            "RMS residual:",
+            metricas["rms_residual"]
+        )
+
+    if "pico_residual" in metricas:
+        print(
+            "Pico residual:",
+            metricas["pico_residual"]
+        )
+
+    if "relacion_rms" in metricas:
+        print(
+            "Residual / ruido RMS:",
+            metricas["relacion_rms"]
+        )
+
+    if "relacion_pico" in metricas:
+        print(
+            "Residual / ruido pico:",
+            metricas["relacion_pico"]
+        )
+
+    print()
+    print("================================")
+    print(f" MEDICION GUARDADA: {numero}")
+    print("================================")
+    print(f"Carpeta: {carpeta}/")
+    print()
+    print(f"muestras_{numero}.csv")
+    print(f"senal_cruda_{numero}.png")
+    print(f"senal_filtrada_{numero}.png")
+    print(f"senal_residual_{numero}.png")
+    print(f"comparacion_residual_{numero}.png")
+
+
+if __name__ == "__main__":
+    main()
