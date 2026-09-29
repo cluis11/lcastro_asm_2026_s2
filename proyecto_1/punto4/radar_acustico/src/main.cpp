@@ -43,6 +43,9 @@ const int FIR_TAPS = 129;
 const float FIR_F_MIN = 3500.0f;
 const float FIR_F_MAX = 11000.0f;
 
+// Primeras muestras contaminadas por arranque del FIR
+const int FIR_DESCARTE_INICIAL = FIR_TAPS - 1;
+
 float fir[FIR_TAPS];
 
 // =====================================================
@@ -50,6 +53,7 @@ float fir[FIR_TAPS];
 // =====================================================
 
 const int NUM_CAPTURAS_RUIDO = 5;
+const int NUM_CAPTURAS_CALENTAMIENTO = 1;
 
 bool ruidoCalibrado = false;
 
@@ -226,7 +230,6 @@ void transmitirChirp() {
         }
 
         dacWrite(PIN_DAC, chirp[i]);
-
         siguiente += periodoUs;
     }
 
@@ -328,27 +331,44 @@ void aplicarFiltroFIR() {
 }
 
 // =====================================================
-// RMS
+// RMS CON INICIO CONFIGURABLE
 // =====================================================
 
-float calcularRMS(const float *senal) {
-    double suma = 0.0;
+float calcularRMS(const float *senal, int inicio = 0) {
+    if (inicio < 0) {
+        inicio = 0;
+    }
 
-    for (int i = 0; i < N; i++) {
+    if (inicio >= N) {
+        return 0.0f;
+    }
+
+    double suma = 0.0;
+    int cantidad = N - inicio;
+
+    for (int i = inicio; i < N; i++) {
         suma += (double)senal[i] * senal[i];
     }
 
-    return sqrt(suma / N);
+    return sqrt(suma / cantidad);
 }
 
 // =====================================================
-// PICO ABSOLUTO
+// PICO ABSOLUTO CON INICIO CONFIGURABLE
 // =====================================================
 
-float calcularPicoAbsoluto(const float *senal) {
+float calcularPicoAbsoluto(const float *senal, int inicio = 0) {
+    if (inicio < 0) {
+        inicio = 0;
+    }
+
+    if (inicio >= N) {
+        return 0.0f;
+    }
+
     float maximo = 0.0f;
 
-    for (int i = 0; i < N; i++) {
+    for (int i = inicio; i < N; i++) {
         float valor = fabsf(senal[i]);
 
         if (valor > maximo) {
@@ -400,8 +420,26 @@ void calibrarRuido() {
     Serial.println(" CALIBRACION DE RUIDO");
     Serial.println("================================");
     Serial.println("No se emitira chirp.");
-    Serial.print("Capturas: ");
+
+    Serial.print("Descartando primeras ");
+    Serial.print(FIR_DESCARTE_INICIAL);
+    Serial.print(" muestras filtradas = ");
+    Serial.print((float)FIR_DESCARTE_INICIAL / FS * 1000.0f, 3);
+    Serial.println(" ms");
+
+    Serial.print("Capturas validas: ");
     Serial.println(NUM_CAPTURAS_RUIDO);
+
+    Serial.println();
+    Serial.println("Realizando captura de calentamiento...");
+
+    for (int i = 0; i < NUM_CAPTURAS_CALENTAMIENTO; i++) {
+        capturarADC(false);
+        quitarDC();
+        aplicarFiltroFIR();
+    }
+
+    Serial.println("Captura de calentamiento descartada.");
     Serial.println();
 
     float sumaRms = 0.0f;
@@ -414,8 +452,15 @@ void calibrarRuido() {
         quitarDC();
         aplicarFiltroFIR();
 
-        float rms = calcularRMS(filtrado);
-        float pico = calcularPicoAbsoluto(filtrado);
+        float rms = calcularRMS(
+            filtrado,
+            FIR_DESCARTE_INICIAL
+        );
+
+        float pico = calcularPicoAbsoluto(
+            filtrado,
+            FIR_DESCARTE_INICIAL
+        );
 
         sumaRms += rms;
 
@@ -479,7 +524,11 @@ void medir() {
     uint16_t maximo;
     float media;
 
-    calcularEstadisticasADC(minimo, maximo, media);
+    calcularEstadisticasADC(
+        minimo,
+        maximo,
+        media
+    );
 
     for (int i = 0; i < N; i++) {
         centrado[i] = (float)datos[i] - media;
@@ -492,8 +541,15 @@ void medir() {
     uint32_t tFiltroFin = micros();
 
     float rmsCruda = calcularRMS(centrado);
-    float rmsFiltrada = calcularRMS(filtrado);
-    float picoFiltrado = calcularPicoAbsoluto(filtrado);
+    float rmsFiltrada = calcularRMS(
+        filtrado,
+        FIR_DESCARTE_INICIAL
+    );
+
+    float picoFiltrado = calcularPicoAbsoluto(
+        filtrado,
+        FIR_DESCARTE_INICIAL
+    );
 
     float tiempoFiltro =
         (float)(tFiltroFin - tFiltroInicio) / 1000.0f;
@@ -557,6 +613,10 @@ void medir() {
     Serial.print("Taps: ");
     Serial.println(FIR_TAPS);
 
+    Serial.print("Descartadas: ");
+    Serial.print(FIR_DESCARTE_INICIAL);
+    Serial.println(" muestras");
+
     Serial.print("RMS cruda: ");
     Serial.println(rmsCruda, 2);
 
@@ -571,11 +631,16 @@ void medir() {
     Serial.println(" ms");
 
     Serial.print("Ruido calibrado: ");
-    Serial.println(ruidoCalibrado ? "SI" : "NO");
+    Serial.println(
+        ruidoCalibrado ? "SI" : "NO"
+    );
 
     if (ruidoCalibrado) {
         Serial.print("RMS ruido: ");
         Serial.println(ruidoRmsPromedio, 2);
+
+        Serial.print("RMS ruido max: ");
+        Serial.println(ruidoRmsMaximo, 2);
 
         Serial.print("Pico ruido: ");
         Serial.println(ruidoPicoMaximo, 2);
@@ -607,7 +672,9 @@ void mostrarEstado() {
     Serial.println("----------- ESTADO --------------");
 
     Serial.print("Ruido calibrado: ");
-    Serial.println(ruidoCalibrado ? "SI" : "NO");
+    Serial.println(
+        ruidoCalibrado ? "SI" : "NO"
+    );
 
     if (ruidoCalibrado) {
         Serial.print("RMS promedio ruido: ");
@@ -619,6 +686,12 @@ void mostrarEstado() {
         Serial.print("Pico maximo ruido: ");
         Serial.println(ruidoPicoMaximo, 2);
     }
+
+    Serial.print("Descartando FIR: ");
+    Serial.print(FIR_DESCARTE_INICIAL);
+    Serial.print(" muestras = ");
+    Serial.print((float)FIR_DESCARTE_INICIAL / FS * 1000.0f, 3);
+    Serial.println(" ms");
 
     Serial.println("--------------------------------");
 }
@@ -645,7 +718,9 @@ void setup() {
     Serial.println("Duracion = 2 ms");
     Serial.println("A = 20");
     Serial.println("FIR = 3.5-11 kHz");
+    Serial.println("FIR taps = 129");
     Serial.println();
+
     Serial.println("Comandos:");
     Serial.println("r = calibrar ruido");
     Serial.println("x = medir con chirp");
