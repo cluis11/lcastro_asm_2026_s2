@@ -1,132 +1,273 @@
 import time
-import csv
+
 import numpy as np
 import matplotlib.pyplot as plt
 import serial
 
-PUERTO = '/dev/ttyUSB0'
+
+# =====================================================
+# CONFIGURACION
+# =====================================================
+
+PUERTO = "/dev/ttyUSB0"
 BAUD = 115200
 
 N = 2048
-M = 15
 
-FS_OBJETIVO = 32000.0
-C = 343.0  # velocidad del sonido [m/s]
+C = 343.0
 
-# -----------------------------------------------------
-# Distancia conocida del objeto para esta prueba
-# -----------------------------------------------------
+ZOOM_MS = 10.0
 
-DISTANCIA_OBJETO_M = 0.50
 
-# Separacion aproximada entre tweeter y microfono
-SEPARACION_TX_RX_M = 0.10
-
-# Zoom que queremos observar
-ZOOM_MS = 12.0
-
+# =====================================================
+# CAPTURAR
+# =====================================================
 
 def capturar():
-    with serial.Serial(PUERTO, BAUD, timeout=1) as s:
 
-        # Al abrir el puerto, el ESP32 puede reiniciarse
+    fs_objetivo = None
+    fs_real = None
+
+    M = None
+    duracion_ms = None
+    amplitud = None
+
+    muestras = []
+
+    with serial.Serial(
+        PUERTO,
+        BAUD,
+        timeout=1
+    ) as s:
+
+        # El ESP32 puede reiniciarse
+        # al abrir el puerto
         time.sleep(3.0)
 
         s.reset_input_buffer()
 
-        print("Enviando comando de medicion...")
-        s.write(b'x\n')
+        print(
+            "Enviando x..."
+        )
+
+        s.write(
+            b"x\n"
+        )
+
         s.flush()
 
-        fs_real = None
+        print(
+            "Esperando medicion..."
+        )
 
-        # ---------------------------------------------
-        # Esperar inicio
-        # ---------------------------------------------
+        # =================================================
+        # ESPERAR INICIO
+        # =================================================
 
-        print("Esperando respuesta del ESP32...")
-
-        tiempo_inicio = time.time()
+        t0 = time.time()
 
         while True:
 
-            linea = s.readline().decode(
-                errors='ignore'
-            ).strip()
+            linea = (
+                s.readline()
+                .decode(
+                    errors="ignore"
+                )
+                .strip()
+            )
 
             if linea:
-                print("ESP32 >", linea)
-
-            if linea == '----------- MEDICION -----------':
-                break
-
-            if time.time() - tiempo_inicio > 10:
-                raise RuntimeError(
-                    "Timeout: no se encontro el inicio "
-                    "de la medicion"
+                print(
+                    "ESP32 >",
+                    linea
                 )
 
-        # ---------------------------------------------
-        # Leer cabecera
-        # ---------------------------------------------
+            if linea == (
+                "----------- MEDICION -----------"
+            ):
+                break
+
+            if (
+                time.time()
+                - t0
+                > 10
+            ):
+                raise RuntimeError(
+                    "Timeout esperando inicio "
+                    "de medicion"
+                )
+
+        # =================================================
+        # LEER CABECERA
+        # =================================================
 
         while True:
 
-            linea = s.readline().decode(
-                errors='ignore'
-            ).strip()
+            linea = (
+                s.readline()
+                .decode(
+                    errors="ignore"
+                )
+                .strip()
+            )
 
             if not linea:
                 continue
 
-            print("ESP32 >", linea)
+            print(
+                "ESP32 >",
+                linea
+            )
 
-            if linea.startswith("Fs real:"):
+            # -----------------------------------------
+            # FS OBJETIVO
+            # -----------------------------------------
 
-                try:
+            if linea.startswith(
+                "Fs objetivo:"
+            ):
 
-                    texto = linea.split(
-                        ":",
-                        1
-                    )[1]
-
-                    texto = texto.replace(
+                texto = (
+                    linea
+                    .split(":", 1)[1]
+                    .replace(
                         "Hz",
                         ""
-                    ).strip()
+                    )
+                    .strip()
+                )
 
-                    fs_real = float(texto)
-
+                try:
+                    fs_objetivo = float(
+                        texto
+                    )
                 except ValueError:
                     pass
 
-            if linea == "--------------------------------":
+            # -----------------------------------------
+            # FS REAL
+            # -----------------------------------------
+
+            elif linea.startswith(
+                "Fs real:"
+            ):
+
+                texto = (
+                    linea
+                    .split(":", 1)[1]
+                    .replace(
+                        "Hz",
+                        ""
+                    )
+                    .strip()
+                )
+
+                try:
+                    fs_real = float(
+                        texto
+                    )
+                except ValueError:
+                    pass
+
+            # -----------------------------------------
+            # M
+            # -----------------------------------------
+
+            elif linea.startswith(
+                "M:"
+            ):
+
+                texto = (
+                    linea
+                    .split(":", 1)[1]
+                    .replace(
+                        "muestras",
+                        ""
+                    )
+                    .strip()
+                )
+
+                try:
+                    M = int(
+                        texto
+                    )
+                except ValueError:
+                    pass
+
+            # -----------------------------------------
+            # DURACION
+            # -----------------------------------------
+
+            elif linea.startswith(
+                "Duracion:"
+            ):
+
+                texto = (
+                    linea
+                    .split(":", 1)[1]
+                    .replace(
+                        "ms",
+                        ""
+                    )
+                    .strip()
+                )
+
+                try:
+                    duracion_ms = float(
+                        texto
+                    )
+                except ValueError:
+                    pass
+
+            # -----------------------------------------
+            # AMPLITUD
+            # -----------------------------------------
+
+            elif linea.startswith(
+                "Amplitud:"
+            ):
+
+                texto = (
+                    linea
+                    .split(":", 1)[1]
+                    .strip()
+                )
+
+                try:
+                    amplitud = float(
+                        texto
+                    )
+                except ValueError:
+                    pass
+
+            # -----------------------------------------
+            # FIN CABECERA
+            # -----------------------------------------
+
+            if linea == (
+                "--------------------------------"
+            ):
                 break
 
-        if fs_real is None:
+        # =================================================
+        # LEER MUESTRAS
+        # =================================================
 
-            print(
-                "Advertencia: no se pudo leer Fs real. "
-                f"Usando {FS_OBJETIVO} Hz"
-            )
-
-            fs_real = FS_OBJETIVO
-
-        # ---------------------------------------------
-        # Leer muestras
-        # ---------------------------------------------
-
-        muestras = []
-
-        tiempo_inicio = time.time()
+        t0 = time.time()
 
         while True:
 
-            linea = s.readline().decode(
-                errors='ignore'
-            ).strip()
+            linea = (
+                s.readline()
+                .decode(
+                    errors="ignore"
+                )
+                .strip()
+            )
 
-            if linea == '------------- FIN --------------':
+            if linea == (
+                "------------- FIN --------------"
+            ):
                 break
 
             if linea:
@@ -137,405 +278,344 @@ def capturar():
                     )
 
                 except ValueError:
-                    print(
-                        "Linea ignorada:",
-                        linea
-                    )
+                    pass
 
-            if time.time() - tiempo_inicio > 15:
-
+            if (
+                time.time()
+                - t0
+                > 15
+            ):
                 raise RuntimeError(
-                    "Timeout esperando las muestras"
+                    "Timeout esperando muestras"
                 )
 
-    return np.array(
-        muestras,
-        dtype=float
-    ), fs_real
+    # =================================================
+    # VALIDACIONES
+    # =================================================
 
+    if len(muestras) == 0:
 
-# =====================================================
-# PROGRAMA PRINCIPAL
-# =====================================================
-
-if __name__ == "__main__":
-
-    datos, FS = capturar()
-
-    print()
-    print(
-        f"Muestras recibidas: {len(datos)}"
-    )
-
-    print(
-        f"Fs utilizada: {FS:.2f} Hz"
-    )
-
-    if len(datos) == 0:
         raise RuntimeError(
-            "No se recibieron muestras"
+            "No llegaron muestras"
         )
 
-    if len(datos) != N:
+    if fs_objetivo is None:
+        fs_objetivo = 86000.0
 
-        print(
-            f"Advertencia: se esperaban {N} muestras "
-            f"pero llegaron {len(datos)}"
+    if fs_real is None:
+        fs_real = fs_objetivo
+
+    if M is None:
+        M = 172
+
+    if duracion_ms is None:
+        duracion_ms = (
+            M /
+            fs_objetivo *
+            1000.0
         )
 
-    # =================================================
-    # QUITAR COMPONENTE DC
-    # =================================================
+    return (
+        np.array(
+            muestras,
+            dtype=float
+        ),
+        fs_objetivo,
+        fs_real,
+        M,
+        duracion_ms,
+        amplitud
+    )
 
-    media = np.mean(datos)
 
-    datos_c = datos - media
+# =====================================================
+# MAIN
+# =====================================================
+
+datos, fs_objetivo, fs_real, M, duracion_ms, amplitud = (
+    capturar()
+)
+
+print()
+
+print(
+    f"Muestras recibidas: "
+    f"{len(datos)}"
+)
+
+print(
+    f"Fs objetivo: "
+    f"{fs_objetivo:.2f} Hz"
+)
+
+print(
+    f"Fs reportada: "
+    f"{fs_real:.2f} Hz"
+)
+
+print(
+    f"M: {M}"
+)
+
+print(
+    f"Duracion chirp: "
+    f"{duracion_ms:.3f} ms"
+)
+
+if amplitud is not None:
 
     print(
-        f"Media ADC: {media:.2f}"
+        f"Amplitud chirp: "
+        f"{amplitud:.1f}"
     )
 
-    print(
-        f"Min centrado: {np.min(datos_c):.2f}"
-    )
 
-    print(
-        f"Max centrado: {np.max(datos_c):.2f}"
-    )
+# =====================================================
+# CENTRAR
+# =====================================================
 
-    # =================================================
-    # EJES
-    # =================================================
+media = np.mean(
+    datos
+)
 
-    n = np.arange(
-        len(datos_c)
-    )
+centrado = (
+    datos - media
+)
 
-    t_s = n / FS
+print()
 
-    t_ms = t_s * 1000.0
+print(
+    f"Media ADC: "
+    f"{media:.2f}"
+)
 
-    d_m = C * t_s / 2.0
+print(
+    f"Min ADC: "
+    f"{np.min(datos):.0f}"
+)
 
-    # =================================================
-    # CHIRP
-    # =================================================
+print(
+    f"Max ADC: "
+    f"{np.max(datos):.0f}"
+)
 
-    duracion_chirp_s = M / FS
+print(
+    f"Rango ADC: "
+    f"{np.max(datos)-np.min(datos):.0f}"
+)
 
-    zona_ciega_ms = (
-        duracion_chirp_s *
-        1000.0
-    )
+print(
+    f"Min centrado: "
+    f"{np.min(centrado):.2f}"
+)
 
-    zona_ciega_m = (
-        C *
-        duracion_chirp_s /
-        2.0
-    )
+print(
+    f"Max centrado: "
+    f"{np.max(centrado):.2f}"
+)
 
-    print()
 
-    print(
-        f"Duracion chirp: "
-        f"{zona_ciega_ms:.3f} ms"
-    )
+# =====================================================
+# EJES
+# =====================================================
 
-    print(
-        f"Zona ciega teorica por duracion: "
-        f"{zona_ciega_m:.3f} m"
-    )
+# Para la grafica usamos Fs objetivo.
+#
+# El "Fs real" calculado por el firmware
+# incluye tiempos de lectura/DMA y no es
+# una medida perfecta del reloj ADC.
 
-    # =================================================
-    # TIEMPO ESPERADO DEL ECO
-    # =================================================
-    #
-    # Como TX y RX estan separados 10 cm:
-    #
-    #       objeto
-    #         *
-    #       /   \
-    #      /     \
-    #    TX       RX
-    #
-    # Para objeto centrado:
-    #
-    # camino total =
-    # 2 * sqrt(d^2 + (separacion/2)^2)
-    #
+FS = fs_objetivo
 
-    mitad_separacion = (
-        SEPARACION_TX_RX_M / 2.0
-    )
+n = np.arange(
+    len(datos)
+)
 
-    camino_total = (
-        2.0 *
-        np.sqrt(
-            DISTANCIA_OBJETO_M ** 2 +
-            mitad_separacion ** 2
-        )
-    )
+t_s = (
+    n / FS
+)
 
-    tiempo_eco_s = (
-        camino_total / C
-    )
+t_ms = (
+    t_s * 1000.0
+)
 
-    tiempo_eco_ms = (
-        tiempo_eco_s * 1000.0
-    )
+distancia_equivalente = (
+    C *
+    t_s /
+    2.0
+)
 
-    muestra_eco = (
-        tiempo_eco_s * FS
-    )
 
-    print()
+# =====================================================
+# ZONA CIEGA TEORICA
+# =====================================================
 
-    print(
-        f"Objeto de prueba: "
-        f"{DISTANCIA_OBJETO_M:.2f} m"
-    )
+duracion_s = (
+    duracion_ms /
+    1000.0
+)
 
-    print(
-        f"Separacion TX-RX: "
-        f"{SEPARACION_TX_RX_M:.2f} m"
-    )
+zona_ciega = (
+    C *
+    duracion_s /
+    2.0
+)
 
-    print(
-        f"Camino acustico esperado: "
-        f"{camino_total:.4f} m"
-    )
+print()
 
-    print(
-        f"Tiempo esperado del eco: "
-        f"{tiempo_eco_ms:.3f} ms"
-    )
+print(
+    f"Zona ciega teorica: "
+    f"{zona_ciega:.3f} m"
+)
 
-    print(
-        f"Muestra esperada del eco: "
-        f"{muestra_eco:.1f}"
-    )
 
-    # =================================================
-    # GUARDAR CSV
-    # =================================================
+# =====================================================
+# GUARDAR CSV
+# =====================================================
 
-    with open(
-        "muestras.csv",
-        "w",
-        newline=""
-    ) as archivo:
-
-        escritor = csv.writer(
-            archivo
-        )
-
-        escritor.writerow([
-            "muestra",
-            "tiempo_ms",
-            "distancia_equivalente_m",
-            "adc",
-            "adc_centrado"
-        ])
-
-        for i in range(len(datos)):
-
-            escritor.writerow([
-                i,
-                t_ms[i],
-                d_m[i],
-                int(datos[i]),
-                datos_c[i]
-            ])
-
-    print()
-    print(
-        "Guardado: muestras.csv"
-    )
-
-    # =================================================
-    # GRAFICA COMPLETA
-    # =================================================
-
-    fig, ax1 = plt.subplots(
-        figsize=(14, 6)
-    )
-
-    ax1.plot(
+tabla = np.column_stack(
+    (
+        n,
         t_ms,
-        datos_c,
-        linewidth=0.6,
-        label='Microfono'
+        datos,
+        centrado
     )
+)
 
-    ax1.set_xlabel(
-        'Tiempo desde emision (ms)'
+np.savetxt(
+    "muestras.csv",
+    tabla,
+    delimiter=",",
+    header=(
+        "muestra,"
+        "tiempo_ms,"
+        "adc,"
+        "adc_centrado"
+    ),
+    comments="",
+    fmt=[
+        "%d",
+        "%.6f",
+        "%.0f",
+        "%.6f"
+    ]
+)
+
+print(
+    "Guardado: muestras.csv"
+)
+
+
+# =====================================================
+# GRAFICA COMPLETA
+# =====================================================
+
+plt.figure(
+    figsize=(13, 5)
+)
+
+plt.plot(
+    t_ms,
+    centrado,
+    linewidth=0.7
+)
+
+plt.axvline(
+    duracion_ms,
+    linestyle="--",
+    label=(
+        f"Fin chirp "
+        f"{duracion_ms:.2f} ms"
     )
+)
 
-    ax1.set_ylabel(
-        'ADC - media'
+plt.xlabel(
+    "Tiempo (ms)"
+)
+
+plt.ylabel(
+    "ADC - media"
+)
+
+plt.title(
+    "Señal recibida completa"
+)
+
+plt.grid(True)
+
+plt.legend()
+
+plt.tight_layout()
+
+plt.savefig(
+    "senal_cruda.png",
+    dpi=150
+)
+
+print(
+    "Guardado: senal_cruda.png"
+)
+
+
+# =====================================================
+# GRAFICA ZOOM INICIAL
+# =====================================================
+
+plt.figure(
+    figsize=(13, 5)
+)
+
+plt.plot(
+    t_ms,
+    centrado,
+    linewidth=0.8
+)
+
+plt.axvline(
+    duracion_ms,
+    linestyle="--",
+    label=(
+        f"Fin chirp "
+        f"{duracion_ms:.2f} ms"
     )
+)
 
-    ax1.set_title(
-        f'Señal cruda del microfono | '
-        f'M={M} | Fs={FS:.1f} Hz'
-    )
+plt.xlim(
+    0,
+    ZOOM_MS
+)
 
-    ax1.grid(True)
+plt.xlabel(
+    "Tiempo (ms)"
+)
 
-    # -------------------------------------------------
-    # Eje superior
-    # -------------------------------------------------
+plt.ylabel(
+    "ADC - media"
+)
 
-    ax2 = ax1.secondary_xaxis(
-        'top',
-        functions=(
-            lambda t:
-                (t / 1000.0) *
-                C / 2.0,
+plt.title(
+    f"Zoom primeros "
+    f"{ZOOM_MS:.0f} ms"
+)
 
-            lambda d:
-                (2.0 * d / C) *
-                1000.0
-        )
-    )
+plt.grid(True)
 
-    ax2.set_xlabel(
-        'Distancia equivalente por '
-        'tiempo de vuelo (m)'
-    )
+plt.legend()
 
-    # -------------------------------------------------
-    # Duracion chirp
-    # -------------------------------------------------
+plt.tight_layout()
 
-    ax1.axvspan(
-        0,
-        zona_ciega_ms,
-        alpha=0.15,
-        label=(
-            f'Chirp: '
-            f'{zona_ciega_ms:.2f} ms '
-            f'(~{zona_ciega_m:.2f} m)'
-        )
-    )
+plt.savefig(
+    "senal_zoom.png",
+    dpi=150
+)
 
-    ax1.legend()
+print(
+    "Guardado: senal_zoom.png"
+)
 
-    plt.tight_layout()
 
-    plt.savefig(
-        'senal_cruda.png',
-        dpi=150
-    )
+# =====================================================
+# MOSTRAR
+# =====================================================
 
-    print(
-        "Guardado: senal_cruda.png"
-    )
-
-    # =================================================
-    # GRAFICA ZOOM 0 - 12 ms
-    # =================================================
-
-    fig_zoom, axz = plt.subplots(
-        figsize=(14, 6)
-    )
-
-    axz.plot(
-        t_ms,
-        datos_c,
-        marker='.',
-        markersize=4,
-        linewidth=0.8,
-        label='Microfono'
-    )
-
-    # Mostrar solamente primeros 12 ms
-    axz.set_xlim(
-        0,
-        ZOOM_MS
-    )
-
-    axz.set_xlabel(
-        'Tiempo desde emision (ms)'
-    )
-
-    axz.set_ylabel(
-        'ADC - media'
-    )
-
-    axz.set_title(
-        f'Zoom primeros {ZOOM_MS:.0f} ms | '
-        f'Objeto esperado a '
-        f'{DISTANCIA_OBJETO_M:.2f} m'
-    )
-
-    axz.grid(True)
-
-    # -------------------------------------------------
-    # Zona donde todavia se esta transmitiendo
-    # -------------------------------------------------
-
-    axz.axvspan(
-        0,
-        zona_ciega_ms,
-        alpha=0.15,
-        label=(
-            f'Chirp termina: '
-            f'{zona_ciega_ms:.2f} ms'
-        )
-    )
-
-    # -------------------------------------------------
-    # Tiempo esperado del eco del carton
-    # -------------------------------------------------
-
-    axz.axvline(
-        tiempo_eco_ms,
-        linestyle='--',
-        linewidth=1.5,
-        label=(
-            f'Eco esperado 50 cm: '
-            f'{tiempo_eco_ms:.2f} ms '
-            f'(n~{muestra_eco:.1f})'
-        )
-    )
-
-    # -------------------------------------------------
-    # Eje superior de distancia
-    # -------------------------------------------------
-
-    axz2 = axz.secondary_xaxis(
-        'top',
-        functions=(
-            lambda t:
-                (t / 1000.0) *
-                C / 2.0,
-
-            lambda d:
-                (2.0 * d / C) *
-                1000.0
-        )
-    )
-
-    axz2.set_xlabel(
-        'Distancia equivalente aproximada (m)'
-    )
-
-    axz.legend()
-
-    plt.tight_layout()
-
-    plt.savefig(
-        'senal_zoom.png',
-        dpi=150
-    )
-
-    print(
-        "Guardado: senal_zoom.png"
-    )
-
-    # =================================================
-    # MOSTRAR
-    # =================================================
-
-    plt.show()
+plt.show()
