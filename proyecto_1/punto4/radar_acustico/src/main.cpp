@@ -22,6 +22,24 @@ const int LCD_SCL = 22;
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // =====================================================
+// BOTONES
+// =====================================================
+
+const int PIN_BOTON_RUIDO = 27;
+const int PIN_BOTON_BASELINE = 32;
+const int PIN_BOTON_MEDIR = 33;
+
+const unsigned long DEBOUNCE_MS = 50;
+
+bool estadoAnteriorRuido = HIGH;
+bool estadoAnteriorBaseline = HIGH;
+bool estadoAnteriorMedir = HIGH;
+
+unsigned long ultimoCambioRuido = 0;
+unsigned long ultimoCambioBaseline = 0;
+unsigned long ultimoCambioMedir = 0;
+
+// =====================================================
 // GEOMETRIA / DISTANCIA
 // =====================================================
 
@@ -119,6 +137,22 @@ struct ResultadoDistancia {
     float recorridoMetros;
     float distanciaMetros;
 };
+
+// =====================================================
+// LCD
+// =====================================================
+
+void mostrarDistanciaLCD(float distanciaCm) {
+    char texto[17];
+
+    snprintf(texto, sizeof(texto), "%.2f cm", distanciaCm);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Distancia:");
+    lcd.setCursor(0, 1);
+    lcd.print(texto);
+}
 
 // =====================================================
 // SINC
@@ -504,7 +538,7 @@ ResultadoDistancia calcularDistancia(int indiceCorrelacion) {
 }
 
 // =====================================================
-// RUIDO
+// CALIBRAR RUIDO
 // =====================================================
 
 void calibrarRuido() {
@@ -572,7 +606,7 @@ void calibrarRuido() {
 }
 
 // =====================================================
-// BASELINE
+// CALIBRAR BASELINE
 // =====================================================
 
 void calibrarBaseline() {
@@ -768,21 +802,7 @@ void medir() {
 
         Serial.println("================================");
 
-        // =================================================
-        // UNICA OPERACION LCD DEL PROGRAMA
-        // YA TERMINO TODA LA MEDICION
-        // =================================================
-
-        char texto[17];
-        snprintf(texto, sizeof(texto), "%.2f cm", distanciaCm);
-
-        lcd.clear();
-
-        lcd.setCursor(0, 0);
-        lcd.print("Distancia:");
-
-        lcd.setCursor(0, 1);
-        lcd.print(texto);
+        mostrarDistanciaLCD(distanciaCm);
     }
     else {
         Serial.println("DISTANCIA NO VALIDA");
@@ -827,6 +847,60 @@ void mostrarEstado() {
 }
 
 // =====================================================
+// BOTONES
+// =====================================================
+
+void revisarBotones() {
+    bool estadoRuido = digitalRead(PIN_BOTON_RUIDO);
+    bool estadoBaseline = digitalRead(PIN_BOTON_BASELINE);
+    bool estadoMedir = digitalRead(PIN_BOTON_MEDIR);
+
+    unsigned long ahora = millis();
+
+    if (estadoRuido != estadoAnteriorRuido) {
+        if (ahora - ultimoCambioRuido >= DEBOUNCE_MS) {
+            ultimoCambioRuido = ahora;
+
+            if (estadoRuido == LOW) {
+                Serial.println();
+                Serial.println("Boton R presionado");
+                calibrarRuido();
+            }
+        }
+
+        estadoAnteriorRuido = estadoRuido;
+    }
+
+    if (estadoBaseline != estadoAnteriorBaseline) {
+        if (ahora - ultimoCambioBaseline >= DEBOUNCE_MS) {
+            ultimoCambioBaseline = ahora;
+
+            if (estadoBaseline == LOW) {
+                Serial.println();
+                Serial.println("Boton B presionado");
+                calibrarBaseline();
+            }
+        }
+
+        estadoAnteriorBaseline = estadoBaseline;
+    }
+
+    if (estadoMedir != estadoAnteriorMedir) {
+        if (ahora - ultimoCambioMedir >= DEBOUNCE_MS) {
+            ultimoCambioMedir = ahora;
+
+            if (estadoMedir == LOW) {
+                Serial.println();
+                Serial.println("Boton X presionado");
+                medir();
+            }
+        }
+
+        estadoAnteriorMedir = estadoMedir;
+    }
+}
+
+// =====================================================
 // SETUP
 // =====================================================
 
@@ -834,7 +908,10 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    // Inicializamos LCD, pero NO escribimos nada.
+    pinMode(PIN_BOTON_RUIDO, INPUT_PULLUP);
+    pinMode(PIN_BOTON_BASELINE, INPUT_PULLUP);
+    pinMode(PIN_BOTON_MEDIR, INPUT_PULLUP);
+
     Wire.begin(LCD_SDA, LCD_SCL);
     lcd.init();
     lcd.backlight();
@@ -862,18 +939,24 @@ void setup() {
     Serial.println("Offset correlacion = 221");
 
     Serial.println();
-    Serial.println("Comandos:");
+    Serial.println("Comandos Serial:");
     Serial.println("r = calibrar ruido");
     Serial.println("b = calibrar baseline");
     Serial.println("x = medir distancia");
     Serial.println("s = mostrar estado");
 
     Serial.println();
+    Serial.println("Botones:");
+    Serial.println("GPIO27 = ruido");
+    Serial.println("GPIO32 = baseline");
+    Serial.println("GPIO33 = medir");
+
+    Serial.println();
     Serial.println("Secuencia:");
-    Serial.println("1. r");
-    Serial.println("2. b sin objeto");
+    Serial.println("1. R");
+    Serial.println("2. B sin objeto");
     Serial.println("3. colocar objeto");
-    Serial.println("4. x");
+    Serial.println("4. X");
 }
 
 // =====================================================
@@ -881,6 +964,8 @@ void setup() {
 // =====================================================
 
 void loop() {
+    revisarBotones();
+
     if (!Serial.available()) {
         return;
     }
