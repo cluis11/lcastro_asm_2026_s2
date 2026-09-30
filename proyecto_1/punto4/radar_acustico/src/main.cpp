@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 #include "driver/i2s.h"
 #include "driver/adc.h"
 #include <math.h>
@@ -11,18 +13,27 @@ const uint32_t FS = 86000;
 const int N = 2048;
 
 // =====================================================
+// LCD
+// =====================================================
+
+const int LCD_SDA = 21;
+const int LCD_SCL = 22;
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// =====================================================
 // GEOMETRIA / DISTANCIA
 // =====================================================
 
-const float VELOCIDAD_SONIDO = 343.0f; // m/s
-const float SEPARACION_TX_RX = 0.10f;  // 10 cm
+const float VELOCIDAD_SONIDO = 343.0f;
+const float SEPARACION_TX_RX = 0.10f;
 const int OFFSET_CORRELACION = 221;
 
 // =====================================================
 // ADC / MICROFONO
 // =====================================================
 
-const adc1_channel_t CANAL_ADC = ADC1_CHANNEL_6; // GPIO34
+const adc1_channel_t CANAL_ADC = ADC1_CHANNEL_6;
 const i2s_port_t I2S_PORT = I2S_NUM_0;
 
 // =====================================================
@@ -51,7 +62,6 @@ float chirpReferencia[M];
 const int FIR_TAPS = 129;
 const float FIR_F_MIN = 3500.0f;
 const float FIR_F_MAX = 11000.0f;
-
 const int FIR_DESCARTE_INICIAL = FIR_TAPS - 1;
 
 float fir[FIR_TAPS];
@@ -93,7 +103,7 @@ float filtrado[N];
 float residual[N];
 
 // =====================================================
-// RESULTADO CORRELACION
+// RESULTADOS
 // =====================================================
 
 struct ResultadoCorrelacion {
@@ -101,10 +111,6 @@ struct ResultadoCorrelacion {
     float valor;
     float tiempoMs;
 };
-
-// =====================================================
-// RESULTADO DISTANCIA
-// =====================================================
 
 struct ResultadoDistancia {
     bool valida;
@@ -263,7 +269,7 @@ void transmitirChirp() {
 }
 
 // =====================================================
-// CAPTURA CON ADC ACTIVO
+// CAPTURA ADC
 // =====================================================
 
 float capturarADCActivo(bool emitirChirp) {
@@ -277,7 +283,13 @@ float capturarADCActivo(bool emitirChirp) {
         transmitirChirp();
     }
 
-    esp_err_t err = i2s_read(I2S_PORT, datos, sizeof(datos), &bytesLeidos, portMAX_DELAY);
+    esp_err_t err = i2s_read(
+        I2S_PORT,
+        datos,
+        sizeof(datos),
+        &bytesLeidos,
+        portMAX_DELAY
+    );
 
     uint32_t tFin = micros();
 
@@ -299,10 +311,6 @@ float capturarADCActivo(bool emitirChirp) {
 
     return (float)(tFin - tInicio) / 1000.0f;
 }
-
-// =====================================================
-// CAPTURA NORMAL
-// =====================================================
 
 float capturarADC(bool emitirChirp) {
     i2s_adc_enable(I2S_PORT);
@@ -335,7 +343,7 @@ float quitarDC() {
 }
 
 // =====================================================
-// FIR OPTIMIZADO POR SIMETRIA
+// FIR
 // =====================================================
 
 void aplicarFiltroFIR() {
@@ -417,7 +425,7 @@ float calcularPicoAbsoluto(const float *senal, int inicio = 0) {
 }
 
 // =====================================================
-// CORRELACION MANUAL
+// CORRELACION
 // =====================================================
 
 ResultadoCorrelacion correlacionarResidual() {
@@ -457,7 +465,7 @@ ResultadoCorrelacion correlacionarResidual() {
 }
 
 // =====================================================
-// CALCULAR DISTANCIA
+// DISTANCIA
 // =====================================================
 
 ResultadoDistancia calcularDistancia(int indiceCorrelacion) {
@@ -496,7 +504,7 @@ ResultadoDistancia calcularDistancia(int indiceCorrelacion) {
 }
 
 // =====================================================
-// CALIBRAR RUIDO
+// RUIDO
 // =====================================================
 
 void calibrarRuido() {
@@ -564,7 +572,7 @@ void calibrarRuido() {
 }
 
 // =====================================================
-// CALIBRAR BASELINE
+// BASELINE
 // =====================================================
 
 void calibrarBaseline() {
@@ -740,6 +748,8 @@ void medir() {
     Serial.println("================================");
 
     if (distancia.valida) {
+        float distanciaCm = distancia.distanciaMetros * 100.0f;
+
         Serial.print("Indice corregido: ");
         Serial.println(distancia.indiceCorregido);
 
@@ -753,14 +763,31 @@ void medir() {
 
         Serial.println();
         Serial.print(">>> DISTANCIA: ");
-        Serial.print(distancia.distanciaMetros * 100.0f, 2);
+        Serial.print(distanciaCm, 2);
         Serial.println(" cm <<<");
+
+        Serial.println("================================");
+
+        // =================================================
+        // UNICA OPERACION LCD DEL PROGRAMA
+        // YA TERMINO TODA LA MEDICION
+        // =================================================
+
+        char texto[17];
+        snprintf(texto, sizeof(texto), "%.2f cm", distanciaCm);
+
+        lcd.clear();
+
+        lcd.setCursor(0, 0);
+        lcd.print("Distancia:");
+
+        lcd.setCursor(0, 1);
+        lcd.print(texto);
     }
     else {
         Serial.println("DISTANCIA NO VALIDA");
+        Serial.println("================================");
     }
-
-    Serial.println("================================");
 }
 
 // =====================================================
@@ -806,6 +833,11 @@ void mostrarEstado() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
+
+    // Inicializamos LCD, pero NO escribimos nada.
+    Wire.begin(LCD_SDA, LCD_SCL);
+    lcd.init();
+    lcd.backlight();
 
     generarChirp();
     generarFiltroFIR();
