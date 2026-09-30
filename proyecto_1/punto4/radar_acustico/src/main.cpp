@@ -1,38 +1,25 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);
 
     Wire.begin(21, 22);
 
-    Serial.println();
-    Serial.println("Escaneando bus I2C...");
+    lcd.init();
+    lcd.backlight();
 
-    byte encontrados = 0;
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Radar acustico");
 
-    for (byte direccion = 1; direccion < 127; direccion++) {
-        Wire.beginTransmission(direccion);
-        byte error = Wire.endTransmission();
+    lcd.setCursor(0, 1);
+    lcd.print("LCD OK - 0x27");
 
-        if (error == 0) {
-            Serial.print("Dispositivo encontrado en 0x");
-
-            if (direccion < 16) {
-                Serial.print("0");
-            }
-
-            Serial.println(direccion, HEX);
-            encontrados++;
-        }
-    }
-
-    if (encontrados == 0) {
-        Serial.println("No se encontraron dispositivos I2C.");
-    } else {
-        Serial.println("Escaneo terminado.");
-    }
+    Serial.println("LCD inicializada correctamente.");
 }
 
 void loop() {
