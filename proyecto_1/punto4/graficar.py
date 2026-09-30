@@ -6,7 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-PUERTO = "/dev/ttyUSB1"
+PUERTO = "/dev/ttyUSB0"
 BAUDIOS = 115200
 
 FS = 86000.0
