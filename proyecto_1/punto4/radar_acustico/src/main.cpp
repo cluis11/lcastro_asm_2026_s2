@@ -39,7 +39,7 @@ const float SEPARACION_TX_RX = 0.10f;
 const int OFFSET_CORRELACION = 221;
 
 // Rango de busqueda actual. Se validara experimentalmente.
-const float DISTANCIA_MIN_METROS = 0.50f;
+const float DISTANCIA_MIN_METROS = 0.55f;
 const float DISTANCIA_MAX_METROS = 1.50f;
 
 // =====================================================
