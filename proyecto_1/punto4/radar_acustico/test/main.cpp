@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 #include "driver/i2s.h"
 #include "driver/adc.h"
 #include <math.h>
@@ -11,18 +13,45 @@ const uint32_t FS = 86000;
 const int N = 2048;
 
 // =====================================================
+// LCD
+// =====================================================
+
+const int LCD_SDA = 21;
+const int LCD_SCL = 22;
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// =====================================================
+// BOTONES
+// =====================================================
+
+const int PIN_BOTON_RUIDO = 27;
+const int PIN_BOTON_BASELINE = 32;
+const int PIN_BOTON_MEDIR = 33;
+
+const unsigned long DEBOUNCE_MS = 50;
+
+bool estadoAnteriorRuido = HIGH;
+bool estadoAnteriorBaseline = HIGH;
+bool estadoAnteriorMedir = HIGH;
+
+unsigned long ultimoCambioRuido = 0;
+unsigned long ultimoCambioBaseline = 0;
+unsigned long ultimoCambioMedir = 0;
+
+// =====================================================
 // GEOMETRIA / DISTANCIA
 // =====================================================
 
-const float VELOCIDAD_SONIDO = 343.0f; // m/s
-const float SEPARACION_TX_RX = 0.10f;  // 10 cm
+const float VELOCIDAD_SONIDO = 343.0f;
+const float SEPARACION_TX_RX = 0.10f;
 const int OFFSET_CORRELACION = 221;
 
 // =====================================================
 // ADC / MICROFONO
 // =====================================================
 
-const adc1_channel_t CANAL_ADC = ADC1_CHANNEL_6; // GPIO34
+const adc1_channel_t CANAL_ADC = ADC1_CHANNEL_6;
 const i2s_port_t I2S_PORT = I2S_NUM_0;
 
 // =====================================================
@@ -51,7 +80,6 @@ float chirpReferencia[M];
 const int FIR_TAPS = 129;
 const float FIR_F_MIN = 3500.0f;
 const float FIR_F_MAX = 11000.0f;
-
 const int FIR_DESCARTE_INICIAL = FIR_TAPS - 1;
 
 float fir[FIR_TAPS];
@@ -93,7 +121,7 @@ float filtrado[N];
 float residual[N];
 
 // =====================================================
-// RESULTADO CORRELACION
+// RESULTADOS
 // =====================================================
 
 struct ResultadoCorrelacion {
@@ -102,10 +130,6 @@ struct ResultadoCorrelacion {
     float tiempoMs;
 };
 
-// =====================================================
-// RESULTADO DISTANCIA
-// =====================================================
-
 struct ResultadoDistancia {
     bool valida;
     int indiceCorregido;
@@ -113,6 +137,22 @@ struct ResultadoDistancia {
     float recorridoMetros;
     float distanciaMetros;
 };
+
+// =====================================================
+// LCD
+// =====================================================
+
+void mostrarDistanciaLCD(float distanciaCm) {
+    char texto[17];
+
+    snprintf(texto, sizeof(texto), "%.2f cm", distanciaCm);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Distancia:");
+    lcd.setCursor(0, 1);
+    lcd.print(texto);
+}
 
 // =====================================================
 // SINC
@@ -173,11 +213,7 @@ void generarChirp() {
 
         float valor = DAC_CENTRO + A * muestra;
 
-        chirp[n] = (uint8_t)constrain(
-            (int)roundf(valor),
-            0,
-            255
-        );
+        chirp[n] = (uint8_t)constrain((int)roundf(valor), 0, 255);
     }
 }
 
@@ -267,7 +303,7 @@ void transmitirChirp() {
 }
 
 // =====================================================
-// CAPTURA CON ADC ACTIVO
+// CAPTURA ADC
 // =====================================================
 
 float capturarADCActivo(bool emitirChirp) {
@@ -310,10 +346,6 @@ float capturarADCActivo(bool emitirChirp) {
     return (float)(tFin - tInicio) / 1000.0f;
 }
 
-// =====================================================
-// CAPTURA NORMAL
-// =====================================================
-
 float capturarADC(bool emitirChirp) {
     i2s_adc_enable(I2S_PORT);
 
@@ -345,7 +377,7 @@ float quitarDC() {
 }
 
 // =====================================================
-// FIR OPTIMIZADO POR SIMETRIA
+// FIR
 // =====================================================
 
 void aplicarFiltroFIR() {
@@ -427,7 +459,7 @@ float calcularPicoAbsoluto(const float *senal, int inicio = 0) {
 }
 
 // =====================================================
-// CORRELACION MANUAL
+// CORRELACION
 // =====================================================
 
 ResultadoCorrelacion correlacionarResidual() {
@@ -460,15 +492,14 @@ ResultadoCorrelacion correlacionarResidual() {
     }
 
     if (resultado.indice >= 0) {
-        resultado.tiempoMs =
-            1000.0f * resultado.indice / FS;
+        resultado.tiempoMs = 1000.0f * resultado.indice / FS;
     }
 
     return resultado;
 }
 
 // =====================================================
-// CALCULAR DISTANCIA
+// DISTANCIA
 // =====================================================
 
 ResultadoDistancia calcularDistancia(int indiceCorrelacion) {
@@ -484,11 +515,8 @@ ResultadoDistancia calcularDistancia(int indiceCorrelacion) {
         return resultado;
     }
 
-    float tiempoVuelo =
-        (float)resultado.indiceCorregido / FS;
-
-    float recorrido =
-        tiempoVuelo * VELOCIDAD_SONIDO;
+    float tiempoVuelo = (float)resultado.indiceCorregido / FS;
+    float recorrido = tiempoVuelo * VELOCIDAD_SONIDO;
 
     float mitadRecorrido = recorrido * 0.5f;
     float mitadSeparacion = SEPARACION_TX_RX * 0.5f;
@@ -501,15 +529,9 @@ ResultadoDistancia calcularDistancia(int indiceCorrelacion) {
         return resultado;
     }
 
-    resultado.tiempoVueloMs =
-        tiempoVuelo * 1000.0f;
-
-    resultado.recorridoMetros =
-        recorrido;
-
-    resultado.distanciaMetros =
-        sqrtf(argumento);
-
+    resultado.tiempoVueloMs = tiempoVuelo * 1000.0f;
+    resultado.recorridoMetros = recorrido;
+    resultado.distanciaMetros = sqrtf(argumento);
     resultado.valida = true;
 
     return resultado;
@@ -573,7 +595,6 @@ void calibrarRuido() {
     ruidoCalibrado = true;
 
     Serial.println();
-
     Serial.print("RMS promedio: ");
     Serial.println(ruidoRmsPromedio, 2);
 
@@ -638,12 +659,14 @@ void calibrarBaseline() {
     baselineCalibrado = true;
 
     Serial.println();
-
     Serial.print("RMS baseline: ");
     Serial.println(baselineRms, 2);
 
     Serial.print("Pico baseline: ");
     Serial.println(baselinePico, 2);
+
+    Serial.println();
+    Serial.println("Baseline listo. Puede medir con 'x'.");
 }
 
 // =====================================================
@@ -661,9 +684,7 @@ void medir() {
     float media = quitarDC();
 
     uint32_t tFiltroInicio = micros();
-
     aplicarFiltroFIR();
-
     uint32_t tFiltroFin = micros();
 
     for (int i = 0; i < N; i++) {
@@ -671,25 +692,16 @@ void medir() {
     }
 
     uint32_t tCorrelacionInicio = micros();
-
     ResultadoCorrelacion corr = correlacionarResidual();
-
     uint32_t tCorrelacionFin = micros();
 
-    ResultadoDistancia distancia =
-        calcularDistancia(corr.indice);
+    ResultadoDistancia distancia = calcularDistancia(corr.indice);
 
-    float rmsFiltrada =
-        calcularRMS(filtrado, FIR_DESCARTE_INICIAL);
+    float rmsFiltrada = calcularRMS(filtrado, FIR_DESCARTE_INICIAL);
+    float picoFiltrado = calcularPicoAbsoluto(filtrado, FIR_DESCARTE_INICIAL);
 
-    float picoFiltrado =
-        calcularPicoAbsoluto(filtrado, FIR_DESCARTE_INICIAL);
-
-    float rmsResidual =
-        calcularRMS(residual, FIR_DESCARTE_INICIAL);
-
-    float picoResidual =
-        calcularPicoAbsoluto(residual, FIR_DESCARTE_INICIAL);
+    float rmsResidual = calcularRMS(residual, FIR_DESCARTE_INICIAL);
+    float picoResidual = calcularPicoAbsoluto(residual, FIR_DESCARTE_INICIAL);
 
     float tiempoFiltro =
         (float)(tFiltroFin - tFiltroInicio) / 1000.0f;
@@ -701,13 +713,11 @@ void medir() {
     float relacionPicoRuido = 0.0f;
 
     if (ruidoCalibrado && ruidoRmsPromedio > 0.0f) {
-        relacionRmsRuido =
-            rmsResidual / ruidoRmsPromedio;
+        relacionRmsRuido = rmsResidual / ruidoRmsPromedio;
     }
 
     if (ruidoCalibrado && ruidoPicoMaximo > 0.0f) {
-        relacionPicoRuido =
-            picoResidual / ruidoPicoMaximo;
+        relacionPicoRuido = picoResidual / ruidoPicoMaximo;
     }
 
     Serial.println();
@@ -731,16 +741,13 @@ void medir() {
     Serial.println(" ms");
 
     Serial.println();
-    Serial.println("----------- FILTRADA ------------");
+    Serial.println("----------- SENAL ---------------");
 
-    Serial.print("RMS: ");
+    Serial.print("RMS filtrada: ");
     Serial.println(rmsFiltrada, 2);
 
-    Serial.print("Pico: ");
+    Serial.print("Pico filtrado: ");
     Serial.println(picoFiltrado, 2);
-
-    Serial.println();
-    Serial.println("-------- METRICAS RESIDUAL -------");
 
     Serial.print("RMS residual: ");
     Serial.println(rmsResidual, 2);
@@ -770,9 +777,13 @@ void medir() {
     Serial.println(" ms");
 
     Serial.println();
-    Serial.println("--------- DISTANCIA -------------");
+    Serial.println("================================");
+    Serial.println(" RESULTADO DISTANCIA");
+    Serial.println("================================");
 
     if (distancia.valida) {
+        float distanciaCm = distancia.distanciaMetros * 100.0f;
+
         Serial.print("Indice corregido: ");
         Serial.println(distancia.indiceCorregido);
 
@@ -784,34 +795,19 @@ void medir() {
         Serial.print(distancia.recorridoMetros * 100.0f, 2);
         Serial.println(" cm");
 
-        Serial.print("Distancia estimada: ");
-        Serial.print(distancia.distanciaMetros * 100.0f, 2);
-        Serial.println(" cm");
+        Serial.println();
+        Serial.print(">>> DISTANCIA: ");
+        Serial.print(distanciaCm, 2);
+        Serial.println(" cm <<<");
+
+        Serial.println("================================");
+
+        mostrarDistanciaLCD(distanciaCm);
     }
     else {
-        Serial.println("Distancia no valida");
+        Serial.println("DISTANCIA NO VALIDA");
+        Serial.println("================================");
     }
-
-    Serial.println();
-    Serial.println("----------- CRUDOS --------------");
-
-    for (int i = 0; i < N; i++) {
-        Serial.println(datos[i]);
-    }
-
-    Serial.println("----------- FILTRADOS -----------");
-
-    for (int i = 0; i < N; i++) {
-        Serial.println(filtrado[i], 6);
-    }
-
-    Serial.println("----------- RESIDUAL ------------");
-
-    for (int i = 0; i < N; i++) {
-        Serial.println(residual[i], 6);
-    }
-
-    Serial.println("------------- FIN ---------------");
 }
 
 // =====================================================
@@ -851,12 +847,74 @@ void mostrarEstado() {
 }
 
 // =====================================================
+// BOTONES
+// =====================================================
+
+void revisarBotones() {
+    bool estadoRuido = digitalRead(PIN_BOTON_RUIDO);
+    bool estadoBaseline = digitalRead(PIN_BOTON_BASELINE);
+    bool estadoMedir = digitalRead(PIN_BOTON_MEDIR);
+
+    unsigned long ahora = millis();
+
+    if (estadoRuido != estadoAnteriorRuido) {
+        if (ahora - ultimoCambioRuido >= DEBOUNCE_MS) {
+            ultimoCambioRuido = ahora;
+
+            if (estadoRuido == LOW) {
+                Serial.println();
+                Serial.println("Boton R presionado");
+                calibrarRuido();
+            }
+        }
+
+        estadoAnteriorRuido = estadoRuido;
+    }
+
+    if (estadoBaseline != estadoAnteriorBaseline) {
+        if (ahora - ultimoCambioBaseline >= DEBOUNCE_MS) {
+            ultimoCambioBaseline = ahora;
+
+            if (estadoBaseline == LOW) {
+                Serial.println();
+                Serial.println("Boton B presionado");
+                calibrarBaseline();
+            }
+        }
+
+        estadoAnteriorBaseline = estadoBaseline;
+    }
+
+    if (estadoMedir != estadoAnteriorMedir) {
+        if (ahora - ultimoCambioMedir >= DEBOUNCE_MS) {
+            ultimoCambioMedir = ahora;
+
+            if (estadoMedir == LOW) {
+                Serial.println();
+                Serial.println("Boton X presionado");
+                medir();
+            }
+        }
+
+        estadoAnteriorMedir = estadoMedir;
+    }
+}
+
+// =====================================================
 // SETUP
 // =====================================================
 
 void setup() {
     Serial.begin(115200);
     delay(1000);
+
+    pinMode(PIN_BOTON_RUIDO, INPUT_PULLUP);
+    pinMode(PIN_BOTON_BASELINE, INPUT_PULLUP);
+    pinMode(PIN_BOTON_MEDIR, INPUT_PULLUP);
+
+    Wire.begin(LCD_SDA, LCD_SCL);
+    lcd.init();
+    lcd.backlight();
 
     generarChirp();
     generarFiltroFIR();
@@ -870,23 +928,35 @@ void setup() {
     }
 
     Serial.println();
-    Serial.println("Radar listo.");
+    Serial.println("================================");
+    Serial.println(" RADAR ACUSTICO LISTO");
+    Serial.println("================================");
     Serial.println("Fs = 86 kHz");
     Serial.println("Chirp = 4-10 kHz");
     Serial.println("Duracion = 2 ms");
     Serial.println("A = 10");
     Serial.println("FIR = 3.5-11 kHz");
-    Serial.println("FIR optimizado por simetria");
-    Serial.println("Correlacion manual activada");
-    Serial.println("Calculo de distancia activado");
-    Serial.println("Offset correlacion = 221 muestras");
+    Serial.println("Offset correlacion = 221");
 
     Serial.println();
-    Serial.println("Comandos:");
+    Serial.println("Comandos Serial:");
     Serial.println("r = calibrar ruido");
     Serial.println("b = calibrar baseline");
-    Serial.println("x = medir");
-    Serial.println("s = estado");
+    Serial.println("x = medir distancia");
+    Serial.println("s = mostrar estado");
+
+    Serial.println();
+    Serial.println("Botones:");
+    Serial.println("GPIO27 = ruido");
+    Serial.println("GPIO32 = baseline");
+    Serial.println("GPIO33 = medir");
+
+    Serial.println();
+    Serial.println("Secuencia:");
+    Serial.println("1. R");
+    Serial.println("2. B sin objeto");
+    Serial.println("3. colocar objeto");
+    Serial.println("4. X");
 }
 
 // =====================================================
@@ -894,6 +964,8 @@ void setup() {
 // =====================================================
 
 void loop() {
+    revisarBotones();
+
     if (!Serial.available()) {
         return;
     }

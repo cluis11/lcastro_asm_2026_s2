@@ -26,7 +26,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 // =====================================================
 
 const int PIN_BOTON_RUIDO = 27;
-const int PIN_BOTON_BASELINE = 32;
+const int PIN_BOTON_BASELINE = 32; // Temporalmente no usado
 const int PIN_BOTON_MEDIR = 33;
 
 const unsigned long DEBOUNCE_MS = 50;
@@ -45,7 +45,15 @@ unsigned long ultimoCambioMedir = 0;
 
 const float VELOCIDAD_SONIDO = 343.0f;
 const float SEPARACION_TX_RX = 0.10f;
+
+// Retardo fijo caracterizado previamente.
+// Si la FFT queda estable pero hay error constante,
+// recalibramos este valor despues.
 const int OFFSET_CORRELACION = 221;
+
+// Rango declarado de operacion
+const float DISTANCIA_MIN_METROS = 0.50f;
+const float DISTANCIA_MAX_METROS = 1.50f;
 
 // =====================================================
 // ADC / MICROFONO
@@ -85,7 +93,35 @@ const int FIR_DESCARTE_INICIAL = FIR_TAPS - 1;
 float fir[FIR_TAPS];
 
 // =====================================================
-// CALIBRACION DE RUIDO
+// FFT / CORRELACION
+//
+// FFT_N = 256
+// M = 172
+//
+// overlap = 171
+// nuevas muestras por bloque = 85
+//
+// Correlacion:
+// r[d] = sum x[d+k] * h[k]
+//
+// Se implementa como convolucion:
+// x * reverse(h)
+//
+// usando FFT + multiplicacion compleja + IFFT.
+// =====================================================
+
+const int FFT_N = 256;
+const int FFT_SOLAPE = M - 1;
+const int FFT_BLOQUE_NUEVO = FFT_N - FFT_SOLAPE;
+
+float fftReal[FFT_N];
+float fftImag[FFT_N];
+
+float referenciaFFTReal[FFT_N];
+float referenciaFFTImag[FFT_N];
+
+// =====================================================
+// RUIDO
 // =====================================================
 
 const int NUM_CAPTURAS_RUIDO = 5;
@@ -98,33 +134,20 @@ float ruidoRmsMaximo = 0.0f;
 float ruidoPicoMaximo = 0.0f;
 
 // =====================================================
-// BASELINE
-// =====================================================
-
-const int NUM_CAPTURAS_BASELINE = 5;
-
-bool baselineCalibrado = false;
-
-float baseline[N];
-
-float baselineRms = 0.0f;
-float baselinePico = 0.0f;
-
-// =====================================================
-// BUFFERS
+// BUFFERS DSP
 // =====================================================
 
 uint16_t datos[N];
 
 float centrado[N];
 float filtrado[N];
-float residual[N];
 
 // =====================================================
 // RESULTADOS
 // =====================================================
 
 struct ResultadoCorrelacion {
+    bool valida;
     int indice;
     float valor;
     float tiempoMs;
@@ -155,6 +178,95 @@ void mostrarDistanciaLCD(float distanciaCm) {
 }
 
 // =====================================================
+// FFT RADIX-2
+// =====================================================
+
+void fftRadix2(float *real, float *imag, int n, bool inversa) {
+    int j = 0;
+
+    for (int i = 1; i < n; i++) {
+        int bit = n >> 1;
+
+        while (j & bit) {
+            j ^= bit;
+            bit >>= 1;
+        }
+
+        j ^= bit;
+
+        if (i < j) {
+            float tempReal = real[i];
+            real[i] = real[j];
+            real[j] = tempReal;
+
+            float tempImag = imag[i];
+            imag[i] = imag[j];
+            imag[j] = tempImag;
+        }
+    }
+
+    for (int longitud = 2; longitud <= n; longitud <<= 1) {
+        float angulo = 2.0f * PI / longitud;
+
+        if (!inversa) {
+            angulo = -angulo;
+        }
+
+        float wLenReal = cosf(angulo);
+        float wLenImag = sinf(angulo);
+
+        int mitad = longitud >> 1;
+
+        for (int inicio = 0; inicio < n; inicio += longitud) {
+            float wReal = 1.0f;
+            float wImag = 0.0f;
+
+            for (int k = 0; k < mitad; k++) {
+                int par = inicio + k;
+                int impar = par + mitad;
+
+                float tReal =
+                    real[impar] * wReal -
+                    imag[impar] * wImag;
+
+                float tImag =
+                    real[impar] * wImag +
+                    imag[impar] * wReal;
+
+                float uReal = real[par];
+                float uImag = imag[par];
+
+                real[par] = uReal + tReal;
+                imag[par] = uImag + tImag;
+
+                real[impar] = uReal - tReal;
+                imag[impar] = uImag - tImag;
+
+                float nuevoWReal =
+                    wReal * wLenReal -
+                    wImag * wLenImag;
+
+                float nuevoWImag =
+                    wReal * wLenImag +
+                    wImag * wLenReal;
+
+                wReal = nuevoWReal;
+                wImag = nuevoWImag;
+            }
+        }
+    }
+
+    if (inversa) {
+        float escala = 1.0f / n;
+
+        for (int i = 0; i < n; i++) {
+            real[i] *= escala;
+            imag[i] *= escala;
+        }
+    }
+}
+
+// =====================================================
 // SINC
 // =====================================================
 
@@ -176,19 +288,19 @@ void generarFiltroFIR() {
     for (int i = 0; i < FIR_TAPS; i++) {
         float n = (float)(i - centro);
 
-        float hMax = 2.0f * FIR_F_MAX / FS *
-                     sincF(2.0f * FIR_F_MAX * n / FS);
+        float hMax =
+            2.0f * FIR_F_MAX / FS *
+            sincF(2.0f * FIR_F_MAX * n / FS);
 
-        float hMin = 2.0f * FIR_F_MIN / FS *
-                     sincF(2.0f * FIR_F_MIN * n / FS);
+        float hMin =
+            2.0f * FIR_F_MIN / FS *
+            sincF(2.0f * FIR_F_MIN * n / FS);
 
         float h = hMax - hMin;
 
-        float ventana = 0.54f -
-                        0.46f * cosf(
-                            2.0f * PI * i /
-                            (FIR_TAPS - 1)
-                        );
+        float ventana =
+            0.54f -
+            0.46f * cosf(2.0f * PI * i / (FIR_TAPS - 1));
 
         fir[i] = h * ventana;
     }
@@ -204,8 +316,14 @@ void generarChirp() {
 
     for (int n = 0; n < M; n++) {
         float t = (float)n / FS;
-        float fase = 2.0f * PI * (F0 * t + 0.5f * k * t * t);
-        float ventana = 0.5f * (1.0f - cosf(2.0f * PI * n / (M - 1)));
+
+        float fase =
+            2.0f * PI *
+            (F0 * t + 0.5f * k * t * t);
+
+        float ventana =
+            0.5f *
+            (1.0f - cosf(2.0f * PI * n / (M - 1)));
 
         float muestra = ventana * sinf(fase);
 
@@ -213,12 +331,41 @@ void generarChirp() {
 
         float valor = DAC_CENTRO + A * muestra;
 
-        chirp[n] = (uint8_t)constrain((int)roundf(valor), 0, 255);
+        chirp[n] =
+            (uint8_t)constrain(
+                (int)roundf(valor),
+                0,
+                255
+            );
     }
 }
 
 // =====================================================
-// CONFIGURAR I2S
+// REFERENCIA FFT
+// =====================================================
+
+void prepararReferenciaFFT() {
+    for (int i = 0; i < FFT_N; i++) {
+        referenciaFFTReal[i] = 0.0f;
+        referenciaFFTImag[i] = 0.0f;
+    }
+
+    // Chirp invertido -> matched filter
+    for (int i = 0; i < M; i++) {
+        referenciaFFTReal[i] =
+            chirpReferencia[M - 1 - i];
+    }
+
+    fftRadix2(
+        referenciaFFTReal,
+        referenciaFFTImag,
+        FFT_N,
+        false
+    );
+}
+
+// =====================================================
+// I2S
 // =====================================================
 
 void configurarI2S() {
@@ -241,7 +388,13 @@ void configurarI2S() {
     config.tx_desc_auto_clear = false;
     config.fixed_mclk = 0;
 
-    esp_err_t err = i2s_driver_install(I2S_PORT, &config, 0, nullptr);
+    esp_err_t err =
+        i2s_driver_install(
+            I2S_PORT,
+            &config,
+            0,
+            nullptr
+        );
 
     if (err != ESP_OK) {
         Serial.print("Error i2s_driver_install: ");
@@ -252,7 +405,11 @@ void configurarI2S() {
         }
     }
 
-    err = i2s_set_adc_mode(ADC_UNIT_1, CANAL_ADC);
+    err =
+        i2s_set_adc_mode(
+            ADC_UNIT_1,
+            CANAL_ADC
+        );
 
     if (err != ESP_OK) {
         Serial.print("Error i2s_set_adc_mode: ");
@@ -268,7 +425,7 @@ void configurarI2S() {
 }
 
 // =====================================================
-// VACIAR DMA
+// DMA
 // =====================================================
 
 void vaciarDMA() {
@@ -276,7 +433,13 @@ void vaciarDMA() {
     size_t bytesLeidos = 0;
 
     for (int k = 0; k < 4; k++) {
-        i2s_read(I2S_PORT, buffer, sizeof(buffer), &bytesLeidos, portMAX_DELAY);
+        i2s_read(
+            I2S_PORT,
+            buffer,
+            sizeof(buffer),
+            &bytesLeidos,
+            portMAX_DELAY
+        );
     }
 }
 
@@ -293,6 +456,7 @@ void transmitirChirp() {
         }
 
         dacWrite(PIN_DAC, chirp[i]);
+
         siguiente += periodoUs;
     }
 
@@ -317,13 +481,14 @@ float capturarADCActivo(bool emitirChirp) {
         transmitirChirp();
     }
 
-    esp_err_t err = i2s_read(
-        I2S_PORT,
-        datos,
-        sizeof(datos),
-        &bytesLeidos,
-        portMAX_DELAY
-    );
+    esp_err_t err =
+        i2s_read(
+            I2S_PORT,
+            datos,
+            sizeof(datos),
+            &bytesLeidos,
+            portMAX_DELAY
+        );
 
     uint32_t tFin = micros();
 
@@ -333,7 +498,9 @@ float capturarADCActivo(bool emitirChirp) {
         return -1.0f;
     }
 
-    int muestrasLeidas = bytesLeidos / sizeof(uint16_t);
+    int muestrasLeidas =
+        bytesLeidos /
+        sizeof(uint16_t);
 
     for (int i = 0; i < muestrasLeidas; i++) {
         datos[i] &= 0x0FFF;
@@ -349,7 +516,8 @@ float capturarADCActivo(bool emitirChirp) {
 float capturarADC(bool emitirChirp) {
     i2s_adc_enable(I2S_PORT);
 
-    float tiempo = capturarADCActivo(emitirChirp);
+    float tiempo =
+        capturarADCActivo(emitirChirp);
 
     i2s_adc_disable(I2S_PORT);
 
@@ -370,7 +538,9 @@ float quitarDC() {
     float media = (float)suma / N;
 
     for (int i = 0; i < N; i++) {
-        centrado[i] = (float)datos[i] - media;
+        centrado[i] =
+            (float)datos[i] -
+            media;
     }
 
     return media;
@@ -423,76 +593,220 @@ float calcularRMS(const float *senal, int inicio = 0) {
     }
 
     double suma = 0.0;
-    int cantidad = N - inicio;
 
     for (int i = inicio; i < N; i++) {
-        suma += (double)senal[i] * senal[i];
+        suma +=
+            (double)senal[i] *
+            senal[i];
     }
 
-    return sqrt(suma / cantidad);
+    return sqrt(
+        suma /
+        (N - inicio)
+    );
 }
 
 // =====================================================
-// PICO
+// CALCULAR INDICE ESPERADO DESDE DISTANCIA
 // =====================================================
 
-float calcularPicoAbsoluto(const float *senal, int inicio = 0) {
-    if (inicio < 0) {
-        inicio = 0;
-    }
+int indiceDesdeDistancia(float distanciaMetros) {
+    float mitadSeparacion =
+        SEPARACION_TX_RX * 0.5f;
 
-    if (inicio >= N) {
-        return 0.0f;
-    }
+    float mitadRecorrido =
+        sqrtf(
+            distanciaMetros * distanciaMetros +
+            mitadSeparacion * mitadSeparacion
+        );
 
-    float maximo = 0.0f;
+    float recorrido =
+        2.0f * mitadRecorrido;
 
-    for (int i = inicio; i < N; i++) {
-        float valor = fabsf(senal[i]);
+    float tiempoVuelo =
+        recorrido /
+        VELOCIDAD_SONIDO;
 
-        if (valor > maximo) {
-            maximo = valor;
-        }
-    }
+    int muestrasVuelo =
+        (int)roundf(
+            tiempoVuelo * FS
+        );
 
-    return maximo;
+    return
+        OFFSET_CORRELACION +
+        muestrasVuelo;
 }
 
 // =====================================================
-// CORRELACION
+// CORRELACION FFT
 // =====================================================
 
-ResultadoCorrelacion correlacionarResidual() {
+ResultadoCorrelacion correlacionarFFT() {
     ResultadoCorrelacion resultado;
 
+    resultado.valida = false;
     resultado.indice = -1;
     resultado.valor = 0.0f;
     resultado.tiempoMs = 0.0f;
 
+    int indiceMinimo =
+        indiceDesdeDistancia(
+            DISTANCIA_MIN_METROS
+        );
+
+    int indiceMaximo =
+        indiceDesdeDistancia(
+            DISTANCIA_MAX_METROS
+        );
+
+    int ultimoDesplazamiento =
+        N - M;
+
+    if (indiceMinimo < FIR_DESCARTE_INICIAL) {
+        indiceMinimo =
+            FIR_DESCARTE_INICIAL;
+    }
+
+    if (indiceMaximo > ultimoDesplazamiento) {
+        indiceMaximo =
+            ultimoDesplazamiento;
+    }
+
     float maxAbsoluto = 0.0f;
-    int ultimoIndice = N - M;
 
-    for (int desplazamiento = FIR_DESCARTE_INICIAL;
-         desplazamiento <= ultimoIndice;
-         desplazamiento++) {
+    const int ultimoIndiceConvolucion =
+        N + M - 2;
 
-        float suma = 0.0f;
+    for (
+        int primerIndiceSalida = 0;
+        primerIndiceSalida <= ultimoIndiceConvolucion;
+        primerIndiceSalida += FFT_BLOQUE_NUEVO
+    ) {
+        int primerIndiceEntrada =
+            primerIndiceSalida -
+            FFT_SOLAPE;
 
-        for (int k = 0; k < M; k++) {
-            suma += residual[desplazamiento + k] * chirpReferencia[k];
+        for (int i = 0; i < FFT_N; i++) {
+            int indiceGlobal =
+                primerIndiceEntrada + i;
+
+            if (
+                indiceGlobal >= 0 &&
+                indiceGlobal < N
+            ) {
+                // IMPORTANTE:
+                // Se correlaciona directamente la señal filtrada.
+                // NO hay baseline.
+                fftReal[i] =
+                    filtrado[indiceGlobal];
+            }
+            else {
+                fftReal[i] = 0.0f;
+            }
+
+            fftImag[i] = 0.0f;
         }
 
-        float absoluto = fabsf(suma);
+        // FFT señal recibida
+        fftRadix2(
+            fftReal,
+            fftImag,
+            FFT_N,
+            false
+        );
 
-        if (absoluto > maxAbsoluto) {
-            maxAbsoluto = absoluto;
-            resultado.indice = desplazamiento;
-            resultado.valor = suma;
+        // Multiplicación espectral
+        for (int k = 0; k < FFT_N; k++) {
+            float xr = fftReal[k];
+            float xi = fftImag[k];
+
+            float hr = referenciaFFTReal[k];
+            float hi = referenciaFFTImag[k];
+
+            float yr =
+                xr * hr -
+                xi * hi;
+
+            float yi =
+                xr * hi +
+                xi * hr;
+
+            fftReal[k] = yr;
+            fftImag[k] = yi;
+        }
+
+        // IFFT -> correlación
+        fftRadix2(
+            fftReal,
+            fftImag,
+            FFT_N,
+            true
+        );
+
+        // Resultados válidos overlap-save
+        for (
+            int i = FFT_SOLAPE;
+            i < FFT_N;
+            i++
+        ) {
+            int indiceConvolucion =
+                primerIndiceSalida +
+                (i - FFT_SOLAPE);
+
+            if (
+                indiceConvolucion >
+                ultimoIndiceConvolucion
+            ) {
+                break;
+            }
+
+            // y[d + M - 1] = correlación[d]
+            int desplazamiento =
+                indiceConvolucion -
+                FFT_SOLAPE;
+
+            // Solo aceptar ecos dentro del rango físico
+            if (
+                desplazamiento <
+                indiceMinimo
+            ) {
+                continue;
+            }
+
+            if (
+                desplazamiento >
+                indiceMaximo
+            ) {
+                continue;
+            }
+
+            float valor =
+                fftReal[i];
+
+            float absoluto =
+                fabsf(valor);
+
+            if (absoluto > maxAbsoluto) {
+                maxAbsoluto =
+                    absoluto;
+
+                resultado.indice =
+                    desplazamiento;
+
+                resultado.valor =
+                    valor;
+
+                resultado.valida =
+                    true;
+            }
         }
     }
 
-    if (resultado.indice >= 0) {
-        resultado.tiempoMs = 1000.0f * resultado.indice / FS;
+    if (resultado.valida) {
+        resultado.tiempoMs =
+            1000.0f *
+            resultado.indice /
+            FS;
     }
 
     return resultado;
@@ -502,24 +816,40 @@ ResultadoCorrelacion correlacionarResidual() {
 // DISTANCIA
 // =====================================================
 
-ResultadoDistancia calcularDistancia(int indiceCorrelacion) {
+ResultadoDistancia calcularDistancia(
+    int indiceCorrelacion
+) {
     ResultadoDistancia resultado;
 
     resultado.valida = false;
-    resultado.indiceCorregido = indiceCorrelacion - OFFSET_CORRELACION;
+
+    resultado.indiceCorregido =
+        indiceCorrelacion -
+        OFFSET_CORRELACION;
+
     resultado.tiempoVueloMs = 0.0f;
     resultado.recorridoMetros = 0.0f;
     resultado.distanciaMetros = 0.0f;
 
-    if (resultado.indiceCorregido <= 0) {
+    if (
+        resultado.indiceCorregido <= 0
+    ) {
         return resultado;
     }
 
-    float tiempoVuelo = (float)resultado.indiceCorregido / FS;
-    float recorrido = tiempoVuelo * VELOCIDAD_SONIDO;
+    float tiempoVuelo =
+        (float)resultado.indiceCorregido /
+        FS;
 
-    float mitadRecorrido = recorrido * 0.5f;
-    float mitadSeparacion = SEPARACION_TX_RX * 0.5f;
+    float recorrido =
+        tiempoVuelo *
+        VELOCIDAD_SONIDO;
+
+    float mitadRecorrido =
+        recorrido * 0.5f;
+
+    float mitadSeparacion =
+        SEPARACION_TX_RX * 0.5f;
 
     float argumento =
         mitadRecorrido * mitadRecorrido -
@@ -529,16 +859,24 @@ ResultadoDistancia calcularDistancia(int indiceCorrelacion) {
         return resultado;
     }
 
-    resultado.tiempoVueloMs = tiempoVuelo * 1000.0f;
-    resultado.recorridoMetros = recorrido;
-    resultado.distanciaMetros = sqrtf(argumento);
+    resultado.tiempoVueloMs =
+        tiempoVuelo *
+        1000.0f;
+
+    resultado.recorridoMetros =
+        recorrido;
+
+    resultado.distanciaMetros =
+        sqrtf(argumento);
+
     resultado.valida = true;
 
     return resultado;
 }
 
 // =====================================================
-// CALIBRAR RUIDO
+// CALIBRACION DE RUIDO
+// SOLO DIAGNOSTICO
 // =====================================================
 
 void calibrarRuido() {
@@ -547,7 +885,11 @@ void calibrarRuido() {
     Serial.println(" CALIBRACION DE RUIDO");
     Serial.println("================================");
 
-    for (int i = 0; i < NUM_CAPTURAS_CALENTAMIENTO; i++) {
+    for (
+        int i = 0;
+        i < NUM_CAPTURAS_CALENTAMIENTO;
+        i++
+    ) {
         capturarADC(false);
         quitarDC();
         aplicarFiltroFIR();
@@ -557,14 +899,36 @@ void calibrarRuido() {
     float maxRms = 0.0f;
     float maxPico = 0.0f;
 
-    for (int captura = 0; captura < NUM_CAPTURAS_RUIDO; captura++) {
+    for (
+        int captura = 0;
+        captura < NUM_CAPTURAS_RUIDO;
+        captura++
+    ) {
         capturarADC(false);
 
         quitarDC();
         aplicarFiltroFIR();
 
-        float rms = calcularRMS(filtrado, FIR_DESCARTE_INICIAL);
-        float pico = calcularPicoAbsoluto(filtrado, FIR_DESCARTE_INICIAL);
+        float rms =
+            calcularRMS(
+                filtrado,
+                FIR_DESCARTE_INICIAL
+            );
+
+        float pico = 0.0f;
+
+        for (
+            int i = FIR_DESCARTE_INICIAL;
+            i < N;
+            i++
+        ) {
+            float valor =
+                fabsf(filtrado[i]);
+
+            if (valor > pico) {
+                pico = valor;
+            }
+        }
 
         sumaRms += rms;
 
@@ -588,13 +952,20 @@ void calibrarRuido() {
         delay(50);
     }
 
-    ruidoRmsPromedio = sumaRms / NUM_CAPTURAS_RUIDO;
-    ruidoRmsMaximo = maxRms;
-    ruidoPicoMaximo = maxPico;
+    ruidoRmsPromedio =
+        sumaRms /
+        NUM_CAPTURAS_RUIDO;
+
+    ruidoRmsMaximo =
+        maxRms;
+
+    ruidoPicoMaximo =
+        maxPico;
 
     ruidoCalibrado = true;
 
     Serial.println();
+
     Serial.print("RMS promedio: ");
     Serial.println(ruidoRmsPromedio, 2);
 
@@ -606,123 +977,66 @@ void calibrarRuido() {
 }
 
 // =====================================================
-// CALIBRAR BASELINE
-// =====================================================
-
-void calibrarBaseline() {
-    Serial.println();
-    Serial.println("================================");
-    Serial.println(" CALIBRACION BASELINE");
-    Serial.println("================================");
-    Serial.println("Sin objeto objetivo enfrente.");
-
-    for (int i = 0; i < N; i++) {
-        baseline[i] = 0.0f;
-    }
-
-    capturarADC(true);
-    quitarDC();
-    aplicarFiltroFIR();
-
-    for (int captura = 0; captura < NUM_CAPTURAS_BASELINE; captura++) {
-        capturarADC(true);
-
-        quitarDC();
-        aplicarFiltroFIR();
-
-        float rms = calcularRMS(filtrado, FIR_DESCARTE_INICIAL);
-        float pico = calcularPicoAbsoluto(filtrado, FIR_DESCARTE_INICIAL);
-
-        for (int i = 0; i < N; i++) {
-            baseline[i] += filtrado[i];
-        }
-
-        Serial.print("Captura ");
-        Serial.print(captura + 1);
-        Serial.print("/");
-        Serial.print(NUM_CAPTURAS_BASELINE);
-        Serial.print(" | RMS: ");
-        Serial.print(rms, 2);
-        Serial.print(" | Pico: ");
-        Serial.println(pico, 2);
-
-        delay(100);
-    }
-
-    for (int i = 0; i < N; i++) {
-        baseline[i] /= NUM_CAPTURAS_BASELINE;
-    }
-
-    baselineRms = calcularRMS(baseline, FIR_DESCARTE_INICIAL);
-    baselinePico = calcularPicoAbsoluto(baseline, FIR_DESCARTE_INICIAL);
-
-    baselineCalibrado = true;
-
-    Serial.println();
-    Serial.print("RMS baseline: ");
-    Serial.println(baselineRms, 2);
-
-    Serial.print("Pico baseline: ");
-    Serial.println(baselinePico, 2);
-
-    Serial.println();
-    Serial.println("Baseline listo. Puede medir con 'x'.");
-}
-
-// =====================================================
 // MEDIR
 // =====================================================
 
 void medir() {
-    if (!baselineCalibrado) {
-        Serial.println();
-        Serial.println("ERROR: primero calibre baseline con 'b'.");
-        return;
-    }
+    float tiempoCaptura =
+        capturarADC(true);
 
-    float tiempoCaptura = capturarADC(true);
-    float media = quitarDC();
+    float media =
+        quitarDC();
 
-    uint32_t tFiltroInicio = micros();
+    uint32_t tFiltroInicio =
+        micros();
+
     aplicarFiltroFIR();
-    uint32_t tFiltroFin = micros();
 
-    for (int i = 0; i < N; i++) {
-        residual[i] = filtrado[i] - baseline[i];
-    }
+    uint32_t tFiltroFin =
+        micros();
 
-    uint32_t tCorrelacionInicio = micros();
-    ResultadoCorrelacion corr = correlacionarResidual();
-    uint32_t tCorrelacionFin = micros();
+    uint32_t tFFTInicio =
+        micros();
 
-    ResultadoDistancia distancia = calcularDistancia(corr.indice);
+    ResultadoCorrelacion correlacion =
+        correlacionarFFT();
 
-    float rmsFiltrada = calcularRMS(filtrado, FIR_DESCARTE_INICIAL);
-    float picoFiltrado = calcularPicoAbsoluto(filtrado, FIR_DESCARTE_INICIAL);
+    uint32_t tFFTFin =
+        micros();
 
-    float rmsResidual = calcularRMS(residual, FIR_DESCARTE_INICIAL);
-    float picoResidual = calcularPicoAbsoluto(residual, FIR_DESCARTE_INICIAL);
+    float rmsFiltrada =
+        calcularRMS(
+            filtrado,
+            FIR_DESCARTE_INICIAL
+        );
 
     float tiempoFiltro =
-        (float)(tFiltroFin - tFiltroInicio) / 1000.0f;
+        (float)(
+            tFiltroFin -
+            tFiltroInicio
+        ) /
+        1000.0f;
 
-    float tiempoCorrelacion =
-        (float)(tCorrelacionFin - tCorrelacionInicio) / 1000.0f;
+    float tiempoFFT =
+        (float)(
+            tFFTFin -
+            tFFTInicio
+        ) /
+        1000.0f;
 
-    float relacionRmsRuido = 0.0f;
-    float relacionPicoRuido = 0.0f;
+    int indiceMinimo =
+        indiceDesdeDistancia(
+            DISTANCIA_MIN_METROS
+        );
 
-    if (ruidoCalibrado && ruidoRmsPromedio > 0.0f) {
-        relacionRmsRuido = rmsResidual / ruidoRmsPromedio;
-    }
-
-    if (ruidoCalibrado && ruidoPicoMaximo > 0.0f) {
-        relacionPicoRuido = picoResidual / ruidoPicoMaximo;
-    }
+    int indiceMaximo =
+        indiceDesdeDistancia(
+            DISTANCIA_MAX_METROS
+        );
 
     Serial.println();
     Serial.println("================================");
-    Serial.println(" MEDICION");
+    Serial.println(" RADAR FFT");
     Serial.println("================================");
 
     Serial.print("Tiempo captura: ");
@@ -736,78 +1050,102 @@ void medir() {
     Serial.print(tiempoFiltro, 3);
     Serial.println(" ms");
 
-    Serial.print("Tiempo correlacion: ");
-    Serial.print(tiempoCorrelacion, 3);
-    Serial.println(" ms");
-
-    Serial.println();
-    Serial.println("----------- SENAL ---------------");
-
     Serial.print("RMS filtrada: ");
     Serial.println(rmsFiltrada, 2);
 
-    Serial.print("Pico filtrado: ");
-    Serial.println(picoFiltrado, 2);
+    Serial.println();
 
-    Serial.print("RMS residual: ");
-    Serial.println(rmsResidual, 2);
+    Serial.print("Rango declarado: ");
+    Serial.print(
+        DISTANCIA_MIN_METROS *
+        100.0f,
+        0
+    );
+    Serial.print(" - ");
+    Serial.print(
+        DISTANCIA_MAX_METROS *
+        100.0f,
+        0
+    );
+    Serial.println(" cm");
 
-    Serial.print("Pico residual: ");
-    Serial.println(picoResidual, 2);
-
-    if (ruidoCalibrado) {
-        Serial.print("Residual / ruido RMS: ");
-        Serial.println(relacionRmsRuido, 2);
-
-        Serial.print("Residual / ruido pico: ");
-        Serial.println(relacionPicoRuido, 2);
-    }
+    Serial.print("Busqueda indices: ");
+    Serial.print(indiceMinimo);
+    Serial.print(" - ");
+    Serial.println(indiceMaximo);
 
     Serial.println();
-    Serial.println("-------- CORRELACION ------------");
+    Serial.println("--------- FFT + CORRELACION --------");
 
-    Serial.print("Pico correlacion: ");
-    Serial.println(corr.valor, 2);
+    Serial.print("FFT N: ");
+    Serial.println(FFT_N);
 
-    Serial.print("Indice correlacion: ");
-    Serial.println(corr.indice);
-
-    Serial.print("Tiempo correlacion: ");
-    Serial.print(corr.tiempoMs, 3);
+    Serial.print("Tiempo FFT/correlacion: ");
+    Serial.print(tiempoFFT, 3);
     Serial.println(" ms");
+
+    if (!correlacion.valida) {
+        Serial.println("No se encontro eco valido.");
+        return;
+    }
+
+    Serial.print("Pico correlacion FFT: ");
+    Serial.println(correlacion.valor, 2);
+
+    Serial.print("Indice correlacion FFT: ");
+    Serial.println(correlacion.indice);
+
+    Serial.print("Tiempo indice FFT: ");
+    Serial.print(correlacion.tiempoMs, 3);
+    Serial.println(" ms");
+
+    ResultadoDistancia distancia =
+        calcularDistancia(
+            correlacion.indice
+        );
 
     Serial.println();
     Serial.println("================================");
     Serial.println(" RESULTADO DISTANCIA");
     Serial.println("================================");
 
-    if (distancia.valida) {
-        float distanciaCm = distancia.distanciaMetros * 100.0f;
-
-        Serial.print("Indice corregido: ");
-        Serial.println(distancia.indiceCorregido);
-
-        Serial.print("Tiempo vuelo: ");
-        Serial.print(distancia.tiempoVueloMs, 3);
-        Serial.println(" ms");
-
-        Serial.print("Recorrido total: ");
-        Serial.print(distancia.recorridoMetros * 100.0f, 2);
-        Serial.println(" cm");
-
-        Serial.println();
-        Serial.print(">>> DISTANCIA: ");
-        Serial.print(distanciaCm, 2);
-        Serial.println(" cm <<<");
-
-        Serial.println("================================");
-
-        mostrarDistanciaLCD(distanciaCm);
-    }
-    else {
+    if (!distancia.valida) {
         Serial.println("DISTANCIA NO VALIDA");
         Serial.println("================================");
+        return;
     }
+
+    float distanciaCm =
+        distancia.distanciaMetros *
+        100.0f;
+
+    Serial.print("Indice FFT: ");
+    Serial.println(correlacion.indice);
+
+    Serial.print("Indice corregido: ");
+    Serial.println(distancia.indiceCorregido);
+
+    Serial.print("Tiempo vuelo: ");
+    Serial.print(distancia.tiempoVueloMs, 3);
+    Serial.println(" ms");
+
+    Serial.print("Recorrido total: ");
+    Serial.print(
+        distancia.recorridoMetros *
+        100.0f,
+        2
+    );
+    Serial.println(" cm");
+
+    Serial.println();
+
+    Serial.print(">>> DISTANCIA: ");
+    Serial.print(distanciaCm, 2);
+    Serial.println(" cm <<<");
+
+    Serial.println("================================");
+
+    mostrarDistanciaLCD(distanciaCm);
 }
 
 // =====================================================
@@ -818,30 +1156,47 @@ void mostrarEstado() {
     Serial.println();
     Serial.println("----------- ESTADO --------------");
 
+    Serial.println("Sistema: correlacion por FFT");
+
+    Serial.print("FFT N: ");
+    Serial.println(FFT_N);
+
+    Serial.print("Rango: ");
+    Serial.print(
+        DISTANCIA_MIN_METROS *
+        100.0f,
+        0
+    );
+    Serial.print(" - ");
+    Serial.print(
+        DISTANCIA_MAX_METROS *
+        100.0f,
+        0
+    );
+    Serial.println(" cm");
+
+    Serial.print("Indice minimo: ");
+    Serial.println(
+        indiceDesdeDistancia(
+            DISTANCIA_MIN_METROS
+        )
+    );
+
+    Serial.print("Indice maximo: ");
+    Serial.println(
+        indiceDesdeDistancia(
+            DISTANCIA_MAX_METROS
+        )
+    );
+
     Serial.print("Ruido calibrado: ");
-    Serial.println(ruidoCalibrado ? "SI" : "NO");
+    Serial.println(
+        ruidoCalibrado ?
+        "SI" :
+        "NO"
+    );
 
-    if (ruidoCalibrado) {
-        Serial.print("RMS ruido: ");
-        Serial.println(ruidoRmsPromedio, 2);
-
-        Serial.print("Pico ruido: ");
-        Serial.println(ruidoPicoMaximo, 2);
-    }
-
-    Serial.print("Baseline calibrado: ");
-    Serial.println(baselineCalibrado ? "SI" : "NO");
-
-    if (baselineCalibrado) {
-        Serial.print("RMS baseline: ");
-        Serial.println(baselineRms, 2);
-
-        Serial.print("Pico baseline: ");
-        Serial.println(baselinePico, 2);
-    }
-
-    Serial.print("Offset correlacion: ");
-    Serial.println(OFFSET_CORRELACION);
+    Serial.println("Baseline: NO UTILIZADO");
 
     Serial.println("--------------------------------");
 }
@@ -851,52 +1206,98 @@ void mostrarEstado() {
 // =====================================================
 
 void revisarBotones() {
-    bool estadoRuido = digitalRead(PIN_BOTON_RUIDO);
-    bool estadoBaseline = digitalRead(PIN_BOTON_BASELINE);
-    bool estadoMedir = digitalRead(PIN_BOTON_MEDIR);
+    bool estadoRuido =
+        digitalRead(
+            PIN_BOTON_RUIDO
+        );
 
-    unsigned long ahora = millis();
+    bool estadoBaseline =
+        digitalRead(
+            PIN_BOTON_BASELINE
+        );
 
-    if (estadoRuido != estadoAnteriorRuido) {
-        if (ahora - ultimoCambioRuido >= DEBOUNCE_MS) {
-            ultimoCambioRuido = ahora;
+    bool estadoMedir =
+        digitalRead(
+            PIN_BOTON_MEDIR
+        );
+
+    unsigned long ahora =
+        millis();
+
+    if (
+        estadoRuido !=
+        estadoAnteriorRuido
+    ) {
+        if (
+            ahora -
+            ultimoCambioRuido >=
+            DEBOUNCE_MS
+        ) {
+            ultimoCambioRuido =
+                ahora;
 
             if (estadoRuido == LOW) {
                 Serial.println();
-                Serial.println("Boton R presionado");
+                Serial.println(
+                    "Boton R presionado"
+                );
+
                 calibrarRuido();
             }
         }
 
-        estadoAnteriorRuido = estadoRuido;
+        estadoAnteriorRuido =
+            estadoRuido;
     }
 
-    if (estadoBaseline != estadoAnteriorBaseline) {
-        if (ahora - ultimoCambioBaseline >= DEBOUNCE_MS) {
-            ultimoCambioBaseline = ahora;
+    if (
+        estadoBaseline !=
+        estadoAnteriorBaseline
+    ) {
+        if (
+            ahora -
+            ultimoCambioBaseline >=
+            DEBOUNCE_MS
+        ) {
+            ultimoCambioBaseline =
+                ahora;
 
             if (estadoBaseline == LOW) {
                 Serial.println();
-                Serial.println("Boton B presionado");
-                calibrarBaseline();
+                Serial.println(
+                    "B no se usa en esta version FFT."
+                );
             }
         }
 
-        estadoAnteriorBaseline = estadoBaseline;
+        estadoAnteriorBaseline =
+            estadoBaseline;
     }
 
-    if (estadoMedir != estadoAnteriorMedir) {
-        if (ahora - ultimoCambioMedir >= DEBOUNCE_MS) {
-            ultimoCambioMedir = ahora;
+    if (
+        estadoMedir !=
+        estadoAnteriorMedir
+    ) {
+        if (
+            ahora -
+            ultimoCambioMedir >=
+            DEBOUNCE_MS
+        ) {
+            ultimoCambioMedir =
+                ahora;
 
             if (estadoMedir == LOW) {
                 Serial.println();
-                Serial.println("Boton X presionado");
+                Serial.println(
+                    "Boton X presionado"
+                );
+
                 medir();
             }
         }
 
-        estadoAnteriorMedir = estadoMedir;
+        estadoAnteriorMedir =
+            estadoMedir;
     }
 }
 
@@ -908,55 +1309,101 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    pinMode(PIN_BOTON_RUIDO, INPUT_PULLUP);
-    pinMode(PIN_BOTON_BASELINE, INPUT_PULLUP);
-    pinMode(PIN_BOTON_MEDIR, INPUT_PULLUP);
+    pinMode(
+        PIN_BOTON_RUIDO,
+        INPUT_PULLUP
+    );
 
-    Wire.begin(LCD_SDA, LCD_SCL);
+    pinMode(
+        PIN_BOTON_BASELINE,
+        INPUT_PULLUP
+    );
+
+    pinMode(
+        PIN_BOTON_MEDIR,
+        INPUT_PULLUP
+    );
+
+    Wire.begin(
+        LCD_SDA,
+        LCD_SCL
+    );
+
     lcd.init();
     lcd.backlight();
 
     generarChirp();
     generarFiltroFIR();
+    prepararReferenciaFFT();
 
-    dacWrite(PIN_DAC, DAC_CENTRO);
+    dacWrite(
+        PIN_DAC,
+        DAC_CENTRO
+    );
+
     configurarI2S();
-
-    for (int i = 0; i < N; i++) {
-        baseline[i] = 0.0f;
-        residual[i] = 0.0f;
-    }
 
     Serial.println();
     Serial.println("================================");
-    Serial.println(" RADAR ACUSTICO LISTO");
+    Serial.println(" RADAR ACUSTICO FFT");
     Serial.println("================================");
+
     Serial.println("Fs = 86 kHz");
     Serial.println("Chirp = 4-10 kHz");
     Serial.println("Duracion = 2 ms");
-    Serial.println("A = 10");
     Serial.println("FIR = 3.5-11 kHz");
-    Serial.println("Offset correlacion = 221");
 
     Serial.println();
-    Serial.println("Comandos Serial:");
-    Serial.println("r = calibrar ruido");
-    Serial.println("b = calibrar baseline");
-    Serial.println("x = medir distancia");
-    Serial.println("s = mostrar estado");
+
+    Serial.println("Procesamiento:");
+    Serial.println("ADC");
+    Serial.println("-> quitar DC");
+    Serial.println("-> FIR");
+    Serial.println("-> FFT");
+    Serial.println("-> producto espectral");
+    Serial.println("-> IFFT");
+    Serial.println("-> correlacion");
+    Serial.println("-> ToF");
+    Serial.println("-> distancia");
 
     Serial.println();
-    Serial.println("Botones:");
-    Serial.println("GPIO27 = ruido");
-    Serial.println("GPIO32 = baseline");
-    Serial.println("GPIO33 = medir");
+
+    Serial.print("Rango = ");
+    Serial.print(
+        DISTANCIA_MIN_METROS *
+        100.0f,
+        0
+    );
+    Serial.print(" - ");
+    Serial.print(
+        DISTANCIA_MAX_METROS *
+        100.0f,
+        0
+    );
+    Serial.println(" cm");
+
+    Serial.print("Indices buscados = ");
+    Serial.print(
+        indiceDesdeDistancia(
+            DISTANCIA_MIN_METROS
+        )
+    );
+    Serial.print(" - ");
+    Serial.println(
+        indiceDesdeDistancia(
+            DISTANCIA_MAX_METROS
+        )
+    );
 
     Serial.println();
-    Serial.println("Secuencia:");
-    Serial.println("1. R");
-    Serial.println("2. B sin objeto");
-    Serial.println("3. colocar objeto");
-    Serial.println("4. X");
+    Serial.println("Baseline deshabilitado.");
+    Serial.println("La distancia sale solo de correlacion FFT.");
+
+    Serial.println();
+    Serial.println("Comandos:");
+    Serial.println("r = ruido diagnostico");
+    Serial.println("x = medir");
+    Serial.println("s = estado");
 }
 
 // =====================================================
@@ -970,7 +1417,8 @@ void loop() {
         return;
     }
 
-    char comando = Serial.read();
+    char comando =
+        Serial.read();
 
     while (Serial.available()) {
         Serial.read();
@@ -980,7 +1428,9 @@ void loop() {
         calibrarRuido();
     }
     else if (comando == 'b') {
-        calibrarBaseline();
+        Serial.println(
+            "Baseline no se usa en esta version FFT."
+        );
     }
     else if (comando == 'x') {
         medir();
